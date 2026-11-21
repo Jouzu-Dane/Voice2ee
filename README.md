@@ -10,7 +10,7 @@ sounds right.
 - **Loudness in LUFS**, the same measure loudness meters and platforms use (default target -18 LUFS)
 - **Peaks held under -6 dBFS**, what OBS's mixer meter shows
 - **Keyboard and mouse noise** handled by a gate (or expander) calibrated on your actual clicks, plus RNNoise
-- **Plosives and sibilance** handled by a steep high-pass, and two de-essers (wide, plus a narrow one for a "snake S")
+- **Plosives and sibilance** handled by a steep high-pass, and two de-essers (wide, plus a narrow one for a "snake S")Run voice2ee and choose
 - **Gain safety:** never adds more than 12 dB to your voice (measured, not guessed). It also catches settings
   that push peaks past the limiter, such as the limiter's *Threshold Boost*.
 - **Record once:** record yourself once, and every tuning round replays that recording through EasyEffects.
@@ -62,7 +62,7 @@ On any other distro it tells you what to install.
 ```bash
 git clone https://github.com/YOUR-USER/voice2ee.git
 cd voice2ee
-./install.sh
+./install.shRun voice2ee and choose
 ```
 
 The installer:
@@ -320,11 +320,8 @@ keyboard clicks, at a real mic's levels. Tests that need it are skipped if ffmpe
 
 ## Known limitations
 
-- **Not yet verified against a real EasyEffects:** the de-esser and exciter key names, and the sidechain filter
-  labels, come from exported presets and the plugin docs. The read-back check flags anything EasyEffects applies
-  differently.
-- **Noise reduction is RNNoise.** Neural models such as DeepFilterNet remove keyboard clicks better. That's a
-  possible future option.
+- **Noise reduction is RNNoise.** Neural models such as DeepFilterNet remove keyboard clicks better. Currently it
+  is an option you can setup manually yourself. I might add it as an option later.
 - **Targets are heuristics:** the speech target curve, de-esser limits and gate placement are reasonable starting
   points, not universal truths. Your ears and the feedback keys have the final say.
 - **Record-once mode** briefly changes the system default input.
