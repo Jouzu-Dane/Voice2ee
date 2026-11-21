@@ -7,7 +7,8 @@ from pathlib import Path
 
 from . import easyeffects as ee
 from .analysis import analyze_take
-from .audio import (ReplayError, capture_live, list_sources, load_take, replay_available, replay_take, save_take)
+from .audio import (ReplayError, capture_live, list_sources, load_take, replay_available, replay_take, route_problem,
+                    save_take, warn_route)
 from .config import MAX_BANDS, TAKE_DIR, TARGET_LUFS, clip
 from .loop import tune_loop
 from .planner import finalize_mods, initial_params
@@ -132,6 +133,38 @@ def make_measure(mode, take, ee_src, raw, args, sess):
     return measure
 
 
+def ask_yes_no(prompt, default=True):
+    while True:
+        s = ask(prompt).lower()
+        if not s:
+            return default
+        if s in ("y", "yes"):
+            return True
+        if s in ("n", "no"):
+            return False
+
+
+def record_raw_take(args, ee_src, choose_raw):
+    """One recording of your UNPROCESSED voice. Returns (take, raw_device_or_None).
+    With EasyEffects' local server: effects are bypassed for the recording and the EasyEffects mic is recorded,
+    so there's no separate device to pick (and nothing PipeWire can route to the wrong place).
+    Without it: the raw mic device is recorded, and the tool checks PipeWire really connected it there."""
+    if ee_src and ee.server_path() is not None:
+        print(f"\nRecording your RAW voice: EasyEffects' effects are switched off (bypassed) during this recording, "
+              f"so '{ee_src}' carries your unprocessed mic. They come back on right after.")
+        with ee.bypassed():
+            take = capture_live(ee_src, args)
+        return take, None
+    raw = choose_raw()
+    print(f"\nRecording your RAW voice from '{raw}'.")
+    take = capture_live(raw, args)
+    if route_problem(raw):
+        warn_route(raw, route_problem(raw), "raw recording")
+        if not ask_yes_no("Use this recording anyway? It may already be processed. [y/N]: ", default=False):
+            raise Quit()
+    return take, raw
+
+
 def print_raw_analysis(a):
     print("\n--- Raw mic analysis ---")
     print(f"Noise floor {a['noise_floor']:.1f} dBFS | speech {a['lufs']:.1f} LUFS | peak {a['peak_db']:.1f} dBFS | "
@@ -189,7 +222,9 @@ def main():
         if args.device:
             return args.device
         raw_c = [n for n in sources if not n.startswith("easyeffects")]
-        return pick("Select your RAW microphone (the real mic, before EasyEffects)", raw_c,
+        return pick("Select your RAW microphone (the real mic, before EasyEffects).\n"
+                    "Note: the tuning rounds always measure the EasyEffects mic - that's what is being tuned. "
+                    "The raw mic is\nrecorded alongside it to measure how much gain EasyEffects adds.", raw_c,
                     default=default if default in raw_c else (raw_c[0] if raw_c else None))
 
     def choose_ee():
@@ -214,8 +249,8 @@ def main():
         base = json.loads(Path(bf).read_text()) if bf else None
         P["max_gain"] = max(args.max_gain, P["comp"]["makeup"] if P["modules"]["comp"] else 0.0)
         print(f"Resuming with '{sess.current}'.")
-        raw = choose_raw(st.get("raw"))
         mode = "live" if args.live else ("replay" if (args.replay or st.get("test_mode") == "replay") else "live")
+        raw = choose_raw(st.get("raw")) if (mode == "live" and st.get("raw")) else None
         take = load_take(TAKE_DIR) if mode == "replay" else None
         if mode == "replay" and take is None:
             print("(No saved recording to replay - using live mode.)")
@@ -237,14 +272,23 @@ def main():
         for n in notes:
             print(" *", n)
         print("\nYour original stays untouched.")
-        raw = choose_raw()
-        mode = choose_test_mode(args)
-        take = None
-        if mode == "replay":
-            print("\nFirst, one recording of your RAW mic (it gets replayed through EasyEffects every round).")
-            take = capture_live(raw, args)
-            save_take(take, TAKE_DIR)
         ee_src = choose_ee()
+        print("""
+Record your raw (unprocessed) voice once?
+  Yes (recommended): enables record-once rounds (your recording is replayed through EasyEffects, no talking
+       each round) and exact gain safety (the tool measures how many dB EasyEffects adds to your voice).
+  No:  every round is live (you talk each time). The gain cap then works from the compressor's makeup
+       setting; the -6 dBFS peak ceiling and Threshold Boost checks still run.""")
+        take, raw = None, None
+        if ask_yes_no("Record your raw voice? [Y/n]: ", default=True):
+            mode = choose_test_mode(args)
+            if mode == "replay":
+                take, _ = record_raw_take(args, ee_src, choose_raw)
+                save_take(take, TAKE_DIR)
+            else:
+                raw = choose_raw()
+        else:
+            mode = "live"
         save_state(P, sess, str(src), raw, mode)
         final = tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=base,
                           base_file=str(src), raw=raw, test_mode=mode)
@@ -256,12 +300,15 @@ def main():
     args.mods = choose_modules(args)
     stem = clean_name(args.name or "") or clean_name(ask("\nName for the new preset [stream-voice]: ") or "stream-voice")
     stem = split_name(stem)[0] or "stream-voice"
-    raw = choose_raw()
     mode = choose_test_mode(args)
+    ee_src = choose_ee() if (ee.server_path() is not None or mode == "replay") else None
     take = load_take(TAKE_DIR) if args.reuse else None
+    raw = None
     if take is None:
-        take = capture_live(raw, args)
+        take, raw = record_raw_take(args, ee_src, choose_raw)
         save_take(take, TAKE_DIR)
+    if mode == "live" and raw is None:
+        raw = choose_raw()
     a = analyze_take(take)
     print_raw_analysis(a)
 
@@ -275,11 +322,12 @@ def main():
     save_state(P, sess, raw=raw, mode=mode)
     print(f"\nSaved: {path}")
     print("\nNext, tuning measures the sound AFTER EasyEffects, so the preset gets loaded there.")
-    try:
-        ee_src = choose_ee()
-    except Quit:
-        print(f"\n'{name0}' is saved. Continue tuning later with:  ./voice2ee.py --resume")
-        return
+    if ee_src is None:
+        try:
+            ee_src = choose_ee()
+        except Quit:
+            print(f"\n'{name0}' is saved. Continue tuning later with:  ./voice2ee.py --resume")
+            return
     tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=args.base, raw=raw, test_mode=mode)
     print("Resume later with:  ./voice2ee.py --resume")
 

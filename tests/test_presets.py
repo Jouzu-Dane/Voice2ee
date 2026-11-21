@@ -108,3 +108,15 @@ def test_server_property_names():
     assert ee._camel("gain-boost") == "gainBoost"
     assert ee._camel("bypass") == "bypass"
     assert ee._parse("true") is True and ee._parse("-20.5") == -20.5 and ee._parse("threshold: 3") == 3.0
+
+
+def test_self_comparison_gain_is_ignored():
+    from v2ee.tuning import auto_adjust
+    P, _ = _preset({"noise": "gate", "rnnoise": True, "eq": True, "comp": True, "deess": True, "exciter": False,
+                    "limiter": True})
+    P["comp"]["makeup"] = 10.0
+    a = analyze(rd("noise.wav"), rd("speech_0.wav"), rd("clicks.wav"))
+    a.update(applied_gain=0.1, applied_gain_hi=0.4, gain_corr=0.999)   # "raw" was really the EasyEffects mic
+    msgs = auto_adjust(P, a)
+    assert any("compared the EasyEffects mic with itself" in m for m in msgs)
+    assert "last_gain" not in P

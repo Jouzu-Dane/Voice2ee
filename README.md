@@ -20,6 +20,22 @@ closing the window, and it reads back what EasyEffects actually applied.
 2. **Existing**: load one of your presets, test it as-is, and tune it. The original is never changed.
 3. **Quit**. `q`, `quit` and `exit` work at every prompt, in any letter case.
 
+**Raw mic vs EasyEffects mic**: the tuning rounds always measure the EasyEffects mic, because that's what
+is being tuned. Your raw (unprocessed) voice is only needed for two things:
+
+- **Record-once rounds:** the replay needs an unprocessed recording to play through EasyEffects.
+- **Exact gain safety:** the tool measures how many dB EasyEffects adds to your voice.
+
+How the raw voice is recorded:
+
+- **With EasyEffects' local server:** all effects are bypassed for that one recording, and the EasyEffects mic
+  is recorded. There's no device to pick.
+- **Otherwise:** the raw mic device is recorded, and the tool checks which source PipeWire really connected the
+  recording to, and warns if it was moved.
+
+In **Existing** mode, recording your raw voice is optional. If you skip it, every round is live, and the gain
+cap falls back to the makeup setting (the peak ceiling and Threshold Boost checks still run).
+
 **Testing each round**: either *record once* (recommended) or *live*.
 
 - **Record once:** your recording is replayed through EasyEffects each round, using a temporary virtual mic

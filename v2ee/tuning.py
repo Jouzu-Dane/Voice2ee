@@ -15,6 +15,13 @@ def auto_adjust(P, a):
     msgs = []
     m, e, b = P["modules"], P["eq"], P["bias"]
     cap_cfg = P.get("max_gain", 12.0)
+    if (a.get("applied_gain") is not None and abs(a["applied_gain"]) < 0.5 and a.get("gain_corr", 0) > 0.99
+            and m["comp"] and P["comp"]["makeup"] > 4.0):
+        # +0 dB with a near-perfect match while the preset adds makeup: the "raw" recording was really the
+        # EasyEffects mic. Using it would let the gain run past the cap, so ignore it.
+        msgs.append("!! The gain measurement compared the EasyEffects mic with itself (the raw recording wasn't "
+                    "raw) - ignoring it this round")
+        a = {k: v for k, v in a.items() if k not in ("applied_gain", "applied_gain_hi")}
     if a.get("applied_gain") is not None:
         P["last_gain"] = round(float(a["applied_gain"]), 1)
         P["last_gain_hi"] = round(float(a.get("applied_gain_hi", a["applied_gain"])), 1)

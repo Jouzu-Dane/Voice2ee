@@ -1,4 +1,6 @@
 """Recording, gain measurement, and 'record once' replay through EasyEffects."""
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -14,12 +16,63 @@ from .term import hidden_keys
 # ----------------------------------------------------------------------------- sources and recording
 
 
-def list_sources():
+def _pactl(*a, timeout=4):
+    """pactl with English output (its text output is translated in other locales)."""
     try:
-        out = subprocess.run(["pactl", "list", "short", "sources"], capture_output=True, text=True, check=True).stdout
+        return subprocess.run(["pactl", *a], capture_output=True, text=True, timeout=timeout,
+                              env={**os.environ, "LC_ALL": "C"}).stdout
     except Exception:
-        return []
-    return [ln.split("\t")[1] for ln in out.splitlines() if "\t" in ln and not ln.split("\t")[1].endswith(".monitor")]
+        return ""
+
+
+def _source_index_names():
+    return {ln.split("\t")[0]: ln.split("\t")[1] for ln in _pactl("list", "short", "sources").splitlines()
+            if ln.count("\t") >= 1}
+
+
+def list_sources():
+    return [n for n in _source_index_names().values() if not n.endswith(".monitor")]
+
+
+def stream_routes(prefix):
+    """Which source each of our recording streams is REALLY connected to: {stream name: source name}."""
+    names, routes = _source_index_names(), {}
+    js = _pactl("-f", "json", "list", "source-outputs")
+    try:
+        for so in json.loads(js):
+            mn = (so.get("properties") or {}).get("media.name", "")
+            if mn.startswith(prefix):
+                routes[mn] = names.get(str(so.get("source")), str(so.get("source")))
+        return routes
+    except (ValueError, TypeError, AttributeError):
+        pass
+    src = None
+    for line in _pactl("list", "source-outputs").splitlines():
+        line = line.strip()
+        if line.startswith("Source Output #"):
+            src = None
+        elif line.startswith("Source:"):
+            src = line.split(":", 1)[1].strip()
+        elif line.startswith("media.name = "):
+            mn = line.split("=", 1)[1].strip().strip('"')
+            if mn.startswith(prefix):
+                routes[mn] = names.get(src, src)
+    return routes
+
+
+LAST_ROUTES = {}  # device asked for -> source PipeWire actually connected the recording to (last record_multi)
+
+
+def route_problem(dev):
+    """None if the last recording of `dev` really came from `dev` (or couldn't be checked), else the actual source."""
+    actual = LAST_ROUTES.get(dev)
+    return actual if (dev and actual and actual != dev) else None
+
+
+def warn_route(dev, actual, what="recording"):
+    print(f"!! The {what} was supposed to come from '{dev}', but PipeWire connected it to '{actual}'.\n"
+          "   Something (often WirePlumber remembering where an app recorded from) moved it. Check the Recording "
+          "tab in pavucontrol, or clear ~/.local/state/wireplumber/ and try again.")
 
 
 def _meter(x):
@@ -32,8 +85,11 @@ def record_multi(seconds, devices, channels=2):
     """Record several sources at the same time. Returns one (n, channels) float32 array per device."""
     need, blk = int(seconds * SR) * 4 * channels, int(0.05 * SR) * 4 * channels
     procs, bufs = [], [bytearray() for _ in devices]
-    for dev in devices:
-        cmd = ["parec", "--format=float32le", f"--rate={SR}", f"--channels={channels}", "--latency-msec=50"]
+    tag = f"voice2ee-{os.getpid()}-{time.monotonic_ns()}"
+    LAST_ROUTES.clear()
+    for i, dev in enumerate(devices):
+        cmd = ["parec", "--format=float32le", f"--rate={SR}", f"--channels={channels}", "--latency-msec=50",
+               "--client-name=voice2ee", f"--stream-name={tag}-{i}", "--property=node.dont-move=true"]
         if dev:
             cmd.append(f"--device={dev}")
         try:
@@ -50,9 +106,18 @@ def record_multi(seconds, devices, channels=2):
                 break
             bufs[i] += d
 
+    def check_routes():
+        time.sleep(min(0.6, seconds / 3))
+        r = stream_routes(tag)
+        for i, dev in enumerate(devices):
+            if f"{tag}-{i}" in r:
+                LAST_ROUTES[dev] = r[f"{tag}-{i}"]
+
     threads = [threading.Thread(target=reader, args=(i,), daemon=True) for i in range(len(devices))]
     for t in threads:
         t.start()
+    checker = threading.Thread(target=check_routes, daemon=True)
+    checker.start()
     try:
         while any(t.is_alive() for t in threads):
             time.sleep(0.05)
@@ -62,6 +127,7 @@ def record_multi(seconds, devices, channels=2):
     finally:
         for p in procs:
             p.terminate()
+        checker.join(timeout=2)
     print()
     outs = []
     for dev, b in zip(devices, bufs):
@@ -160,12 +226,18 @@ def capture_live(device, args, short=False, raw=None):
         print("\n[1] Room tone - stay completely silent")
         countdown("Silence starting", cd)
         noise = record(ns, device)
+        if route_problem(device):
+            warn_route(device, route_problem(device))
         print("\n[2] Speech - " + ("talk like you do on stream (or read the passage)" if short
                                   else "read this at your normal volume:\n\n" + PASSAGE + "\n"))
         countdown("Start talking", cd + 1)
         raw_speech = None
         if raw and raw != device:
             speech, raw_speech = record_multi(ss, [device, raw])
+            if route_problem(raw):
+                warn_route(raw, route_problem(raw), "raw-mic recording (used to measure the added gain)")
+                print("   Ignoring it this round - the gain cap falls back to the makeup setting.")
+                raw_speech = None
         else:
             speech = record(ss, device)
         clicks = None

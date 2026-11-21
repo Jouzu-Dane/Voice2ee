@@ -83,6 +83,9 @@ def tune_loop(P, sess, measure, base=None, base_file=None, raw=None, test_mode="
           f"{sess.run_name(sess.run + 1)}, -{sess.run + 2}, ...; when you finish, the result becomes "
           f"{sess.stem}_v{next_version(sess.out, sess.stem, sess.ver)}.")
     apply(sess, sess.current, first=True)
+    if test_mode == "live" and not raw:
+        print("(No raw mic: the gain EasyEffects adds isn't measured. The makeup cap, the -6 dBFS peak ceiling and "
+              "the Threshold Boost check still apply.)")
     rnd, prev_sig, prev_changed, prev_mk, warned_mono = 0, None, False, None, False
     replay = test_mode == "replay"
     while True:

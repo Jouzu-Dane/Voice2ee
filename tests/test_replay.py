@@ -30,6 +30,14 @@ if a[:3] == ["list", "short", "sources"]:
     print("2\teasyeffects_source\tPipeWire\tfloat32le 2ch 48000Hz\tRUNNING")
     if os.path.exists(f"{S}/loopback_up"):
         print("3\tvoice2ee_replay_mic\tPipeWire\tfloat32le 2ch 48000Hz\tRUNNING")
+elif a[-2:] == ["list", "source-outputs"]:
+    import json, glob
+    names = {"alsa_input.podmic": 1, "easyeffects_source": 2, "voice2ee_replay_mic": 3}
+    outs = []
+    for i, f in enumerate(sorted(glob.glob(f"{S}/streams/*"))):
+        outs.append({"index": i, "source": names.get(open(f).read().strip(), 99),
+                     "properties": {"media.name": os.path.basename(f)}})
+    print(json.dumps(outs))
 elif a[:1] == ["get-default-source"]:
     print(open(f"{S}/default_source").read().strip())
 elif a[:1] == ["set-default-source"]:
@@ -67,6 +75,10 @@ import numpy as np
 S = os.environ["V2EE_FAKE_STATE"]
 dev = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--device=")), "")
 ch = int(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--channels=")), "1"))
+name = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--stream-name=")), f"parec-{os.getpid()}")
+os.makedirs(f"{S}/streams", exist_ok=True)
+actual = "easyeffects_source" if os.environ.get("V2EE_FAKE_MOVE") == dev else dev   # simulate WirePlumber moving it
+open(f"{S}/streams/{name}", "w").write(actual)
 t0, n, blk, cache = time.time(), 0, 2400, {}
 out = sys.stdout.buffer
 while True:
@@ -95,7 +107,7 @@ class FakeEasyEffects:
 
     def __init__(self, rt, presets, state, faults=None):
         self.path, self.presets, self.state = Path(rt) / "EasyEffectsServer", Path(presets), Path(state)
-        self.loaded, self.faults, self.log = None, faults or {}, []
+        self.loaded, self.faults, self.log, self.bypass = None, faults or {}, [], False
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.bind(str(self.path))
         self.sock.listen(8)
@@ -120,6 +132,11 @@ class FakeEasyEffects:
             return ""
         if p[0] == "get_last_loaded_preset":
             return self.loaded or ""
+        if p[0] == "get_global_bypass":
+            return "1" if self.bypass else "2"
+        if p[0] == "global_bypass":
+            self.bypass = p[1] == "1"
+            return ""
         if p[0] == "get_property":
             base, idx, prop = p[2], p[3], p[4]
             kebab = "".join("-" + ch.lower() if ch.isupper() else ch for ch in prop)
@@ -150,6 +167,7 @@ def _env(faults=None):
     os.environ.update(PATH=f"{tmp / 'bin'}:{os.environ['PATH']}", XDG_RUNTIME_DIR=str(tmp / "rt"),
                       V2EE_FAKE_STATE=str(tmp / "state"), V2EE_TESTS=str(HERE))
     os.environ.pop("V2EE_FAKE_DEAF", None)
+    os.environ.pop("V2EE_FAKE_MOVE", None)
     return tmp, FakeEasyEffects(tmp / "rt", tmp / "presets", tmp / "state", faults)
 
 
@@ -226,4 +244,92 @@ def test_readback_catches_unapplied_setting():
         assert any("limiter#0 gain-boost" in m for m in res["mismatch"])
         assert len(res["mismatch"]) == 2
     finally:
+        fake.close()
+
+
+def test_route_check_catches_moved_raw_recording():
+    from v2ee import audio
+    tmp, fake = _env()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            audio.record_multi(1.0, ["easyeffects_source", "alsa_input.podmic"])
+        assert audio.route_problem("alsa_input.podmic") is None and audio.route_problem("easyeffects_source") is None
+        assert audio.LAST_ROUTES.get("alsa_input.podmic") == "alsa_input.podmic"
+        os.environ["V2EE_FAKE_MOVE"] = "alsa_input.podmic"          # WirePlumber moves the raw recording
+        with contextlib.redirect_stdout(io.StringIO()):
+            audio.record_multi(1.0, ["easyeffects_source", "alsa_input.podmic"])
+        assert audio.route_problem("alsa_input.podmic") == "easyeffects_source"
+    finally:
+        os.environ.pop("V2EE_FAKE_MOVE", None)
+        fake.close()
+
+
+def test_bypass_restores_previous_state():
+    tmp, fake = _env()
+    try:
+        with ee.bypassed():
+            assert fake.bypass is True
+        assert fake.bypass is False                                   # effects back on
+        fake.bypass = True                                            # user had bypass on already
+        with ee.bypassed():
+            pass
+        assert fake.bypass is True                                    # left as the user had it
+    finally:
+        fake.close()
+
+
+def _run_mode2(answers, tmp, monkey):
+    import v2ee.cli as cli
+    a0 = analyze(rd("noise.wav"), rd("speech_0.wav"), rd("clicks.wav"))
+    P, _ = initial_params(a0, args())
+    ee.write_preset(P, "mine", tmp / "presets")
+    seen = {}
+    monkey(cli, "tune_loop", lambda P, sess, measure, **kw: seen.update(kw) or None)
+    monkey(cli, "capture_live", lambda dev, a, short=False, raw=None: seen.setdefault("captured", []).append(dev) or
+           {"noise": rd("noise.wav"), "speech": rd("speech_0.wav"), "clicks": rd("clicks.wav"), "raw_speech": None})
+    monkey(cli, "save_take", lambda take, folder: None)
+    monkey(cli, "replay_available", lambda: [])
+    it = iter(answers)
+    builtins.input = lambda p="": next(it)
+    sys.argv = ["voice2ee", "--mode", "2", "--preset", str(tmp / "presets" / "mine.json"),
+                "--ee-device", "easyeffects_source"]
+    session.CACHE_DIR = tmp / "cache"
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli.main()
+    return seen
+
+
+def _monkey():
+    saved = []
+    def set_(obj, name, val):
+        saved.append((obj, name, getattr(obj, name)))
+        setattr(obj, name, val)
+    def undo():
+        for obj, name, val in reversed(saved):
+            setattr(obj, name, val)
+    return set_, undo
+
+
+def test_mode2_without_raw():
+    tmp, fake = _env()
+    m, undo = _monkey()
+    try:
+        seen = _run_mode2(["n"], tmp, m)                              # "Record your raw voice?" -> no
+        assert seen["test_mode"] == "live" and seen["raw"] is None and "captured" not in seen
+    finally:
+        undo()
+        fake.close()
+
+
+def test_mode2_with_raw_records_through_bypass():
+    tmp, fake = _env()
+    m, undo = _monkey()
+    try:
+        seen = _run_mode2(["", "1"], tmp, m)                          # yes (default), record once
+        assert seen["test_mode"] == "replay"
+        assert seen["captured"] == ["easyeffects_source"]             # recorded the EasyEffects mic...
+        assert "global_bypass:1" in fake.log and "global_bypass:0" in fake.log   # ...with effects bypassed
+        assert fake.bypass is False
+    finally:
+        undo()
         fake.close()

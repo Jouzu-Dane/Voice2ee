@@ -454,6 +454,25 @@ def load_preset(name, path=None):
     return None
 
 
+class bypassed:
+    """All EasyEffects effects off while active (via the local server), so the EasyEffects mic carries your
+    raw voice. The previous bypass state is restored afterwards."""
+
+    def __enter__(self):
+        if server_path() is None:
+            raise RuntimeError("EasyEffects' local server isn't available")
+        self.prev = (server_send("get_global_bypass", want_reply=True) or "").strip()
+        server_send("global_bypass:1")
+        time.sleep(0.6)
+        return self
+
+    def __exit__(self, *exc):
+        if not self.prev.endswith("1"):        # it wasn't bypassed before: turn effects back on
+            server_send("global_bypass:0")
+            time.sleep(0.3)
+        return False
+
+
 def _camel(k):
     head, *rest = k.split("-")
     return head + "".join(w[:1].upper() + w[1:] for w in rest)
