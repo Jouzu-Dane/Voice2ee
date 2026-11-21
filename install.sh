@@ -49,7 +49,7 @@ warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
 bad() { printf '  %s✘%s %s\n' "$R" "$N" "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# ------------------------------------------------------------------------------------------------ uninstall
+#  uninstall
 if [ "$UNINSTALL" = 1 ]; then
   rm -rf "$APP_DIR" "$BIN_DIR/voice2ee"
   echo "Removed $APP_DIR and $BIN_DIR/voice2ee."
@@ -57,7 +57,7 @@ if [ "$UNINSTALL" = 1 ]; then
   exit 0
 fi
 
-# ------------------------------------------------------------------------------------------------ distro
+#  distro
 ID="" ID_LIKE="" PRETTY_NAME="Linux"
 # shellcheck disable=SC1090
 [ -r "$OS_RELEASE" ] && . "$OS_RELEASE"
@@ -161,7 +161,7 @@ esac
 echo "${B}voice2ee installer${N}  -  $PRETTY_NAME${FAMILY:+ ($FAMILY family, $PM)}"
 echo
 
-# ------------------------------------------------------------------------------------------------ checks
+#  checks
 MISSING_REQ=() MISSING_OPT=() PY=""
 PY_OK=0 NUMPY_OK=0 SCIPY_OK=0
 
@@ -260,7 +260,7 @@ if [ "$CHECK_ONLY" = 1 ]; then
   exit 0
 fi
 
-# ------------------------------------------------------------------------------------------------ install deps
+#  install deps
 confirm() {
   [ "$ASSUME_YES" = 1 ] && return 0
   local a
@@ -302,7 +302,7 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-# ------------------------------------------------------------------------------------------------ install tool
+#  install tool
 echo "${B}Installing voice2ee${N} to $APP_DIR"
 mkdir -p "$APP_DIR" "$BIN_DIR"
 rm -rf "$APP_DIR/v2ee"
