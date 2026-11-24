@@ -1,4 +1,5 @@
 """Constants shared by every module."""
+import os
 from pathlib import Path
 
 import numpy as np
@@ -7,6 +8,8 @@ SR = 48000
 FRAME = int(0.05 * SR)                   # 50 ms analysis frames
 CACHE_DIR = Path.home() / ".cache/voice2ee"
 TAKE_DIR = CACHE_DIR / "take"            # the one recording that "record once" mode replays
+DATA_DIR = Path(os.environ.get("VOICE2EE_DATA", Path.home() / ".local/share/voice2ee"))   # models (Full version)
+CONFIG_DIR = Path(os.environ.get("VOICE2EE_CONFIG", Path.home() / ".config/voice2ee"))   # overrides, taste
 
 # Levels
 LEVEL_LO, LEVEL_HI = -18.0, -6.0         # dBFS: speech-peak window (range check) and the limiter ceiling.

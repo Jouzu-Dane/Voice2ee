@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from . import easyeffects as ee
+from . import fit, taste
 from .analysis import analyze_take
 from .audio import (ReplayError, capture_live, list_sources, load_take, replay_available, replay_take, route_problem,
                     save_take, warn_route)
@@ -259,7 +260,20 @@ def main():
     ap.add_argument("--vad-thres", type=float, default=70.0)
     ap.add_argument("--base", help="(mode 1) existing exported preset JSON to merge the new values into")
     ap.add_argument("--out", help="preset directory (default: EasyEffects input preset folder)")
+    g = ap.add_argument_group("fitting (steps 2 and 3)")
+    g.add_argument("--engine", choices=["quick", "optimise"], help="(mode 1) quick prediction, or optimise on your "
+                   "recording (asked if not given)")
+    g.add_argument("--goal", choices=list(fit.score.GOALS), help="what the optimiser prioritises (asked if not given)")
+    g.add_argument("--trials", type=int, help="optimiser tries (default 300 exact / 200 approximate)")
+    g.add_argument("--finetune", choices=["keys", "ab", "both"], help="feedback keys, A/B picks, or both (asked)")
+    g.add_argument("--no-taste", action="store_true", help="don't start from your saved A/B taste")
+    g.add_argument("--no-quality", action="store_true", help="don't use the quality model even if installed")
+    g.add_argument("--check-full", action="store_true", help="show which Full-version parts are installed and work")
     args = ap.parse_args()
+
+    if args.check_full:
+        fit.print_full_status(fit.full_status())
+        return
 
     if args.list_devices:
         print("Source names (use as --device / --ee-device):\n")
@@ -310,8 +324,9 @@ def main():
             print("(No saved recording to replay - using live mode.)")
             mode = "live"
         ee_src = choose_ee()
+        ab = fit.make_ab_runner(take if take is not None else load_take(TAKE_DIR), ee_src, sess, base)
         tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=base, base_file=bf, raw=raw,
-                  test_mode=mode)
+                  test_mode=mode, ab=ab)
         return
 
     choice = args.mode or menu()
@@ -345,8 +360,12 @@ Record your raw (unprocessed) voice once?
         else:
             mode = "live"
         save_state(P, sess, str(src), raw, mode)
+        ab, start_ab = None, False
+        if take is not None:
+            ab = fit.make_ab_runner(take, ee_src, sess, base, st=_exact_status(args))
+            start_ab = fit.choose_finetune(args) in ("ab", "both")
         final = tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=base,
-                          base_file=str(src), raw=raw, test_mode=mode)
+                          base_file=str(src), raw=raw, test_mode=mode, ab=ab, start_ab=start_ab)
         if final:
             print("Resume later with:  ./voice2ee.py --resume")
         return
@@ -372,8 +391,18 @@ Record your raw (unprocessed) voice once?
     print_raw_analysis(a)
 
     P, notes = initial_params(a, args)
+    if not args.no_taste:
+        saved, picks = taste.load_taste()
+        mine = {k: v for k, v in saved.items() if k in taste.dims_for(P)}
+        if picks and any(abs(v) >= 0.05 for v in mine.values()):
+            P = taste.apply_taste(P, mine)
+            notes.append(f"Your saved taste (from {picks} A/B picks) applied: {taste.describe(mine)} "
+                         "(--no-taste to skip)")
     for n in notes:
         print(" *", n)
+    st = _exact_status(args)
+    if fit.choose_engine(args, st) == "optimise":
+        P = fit.run_optimise(P, take, args, st)
     ver = next_version(out, stem)
     name0 = f"{stem}_v{ver}"
     path = ee.write_preset(P, name0, out, args.base)
@@ -387,8 +416,21 @@ Record your raw (unprocessed) voice once?
         except Quit:
             print(f"\n'{name0}' is saved. Continue tuning later with:  ./voice2ee.py --resume")
             return
-    tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=args.base, raw=raw, test_mode=mode)
+    start_ab = fit.choose_finetune(args) in ("ab", "both")
+    ab = fit.make_ab_runner(take, ee_src, sess, args.base, st=st)
+    tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=args.base, raw=raw, test_mode=mode,
+              ab=ab, start_ab=start_ab)
     print("Resume later with:  ./voice2ee.py --resume")
+
+
+_STATUS = {}
+
+
+def _exact_status(args):
+    """Full-version check, once per run (the LV2 self-test takes a few seconds)."""
+    if "st" not in _STATUS:
+        _STATUS["st"] = fit.full_status(run_selftest=getattr(args, "engine", None) != "quick")
+    return _STATUS["st"]
 
 
 def import_preset_with_args(base, args, profile="stream"):

@@ -60,6 +60,7 @@ import numpy as np
 from scipy.io import wavfile
 S = os.environ["V2EE_FAKE_STATE"]
 sys.path.insert(0, os.environ["V2EE_TESTS"])
+sys.path.insert(0, os.path.dirname(os.environ["V2EE_TESTS"]))
 import sim
 x = wavfile.read(sys.argv[-1])[1].astype(np.float32)
 follows = open(f"{S}/default_source").read().strip() == "voice2ee_replay_mic" and os.environ.get("V2EE_FAKE_DEAF") != "1"
@@ -325,11 +326,42 @@ def test_mode2_with_raw_records_through_bypass():
     tmp, fake = _env()
     m, undo = _monkey()
     try:
-        seen = _run_mode2(["", "", "1"], tmp, m)                        # yes (default), record once
+        seen = _run_mode2(["", "", "1", ""], tmp, m)                    # yes (default), record once, keys
         assert seen["test_mode"] == "replay"
         assert seen["captured"] == ["easyeffects_source"]             # recorded the EasyEffects mic...
         assert "global_bypass:1" in fake.log and "global_bypass:0" in fake.log   # ...with effects bypassed
         assert fake.bypass is False
     finally:
         undo()
+        fake.close()
+
+
+def test_ab_picks_through_easyeffects():
+    """Minimal version: A/B versions are rendered by the (fake) EasyEffects via the replay mic."""
+    from v2ee import fit, taste
+    tmp, fake = _env()
+    try:
+        a0 = analyze(rd("noise.wav"), rd("speech_0.wav"), rd("clicks.wav"))
+        P, _ = initial_params(a0, args())
+        ee.write_preset(P, "t_v1", tmp / "presets")
+        sess = session.Session(tmp / "presets", "t", 1, "t_v1")
+        take = {"speech": rd("speech_0.wav")[: 4 * 48000], "clicks": rd("clicks.wav")}
+        run = fit.make_ab_runner(take, "easyeffects_source", sess, st={"exact": (False, [])}, rounds=2)
+        played, answers = [], iter(["a", "b"])
+        real_play, real_ask = taste.play, fit.ask
+        taste.play = lambda x: played.append(len(x))
+        fit.ask = lambda p: next(answers)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                t, picks = run(P)
+        finally:
+            taste.play, fit.ask = real_play, real_ask
+        assert "through EasyEffects" in buf.getvalue() and picks == 2 and len(played) == 4
+        assert any(l.startswith("load_preset:input:voice2ee-ab") for l in fake.log)
+        assert not (tmp / "presets" / "voice2ee-ab.json").exists()               # temp preset removed
+        loads = [l for l in fake.log if l.startswith("load_preset:")]
+        assert loads[-1].startswith("load_preset:input:t_v1"), loads[-3:]          # your preset reloaded
+        assert (tmp / "state" / "default_source").read_text().strip() == "alsa_input.podmic"
+        taste.taste_file().unlink(missing_ok=True)
+    finally:
         fake.close()

@@ -2,7 +2,9 @@
 # voice2ee installer: checks dependencies on any Linux distro, offers to install missing ones with your
 # package manager, and installs voice2ee for your user (no root needed for the tool itself).
 #
-#   ./install.sh              check, offer to install missing packages, install voice2ee
+#   ./install.sh              check, ask Minimal or Full, offer to install missing packages, install voice2ee
+#   ./install.sh --minimal    the small version: Python + numpy + scipy + PipeWire tools only
+#   ./install.sh --full       + exact offline plugins (lilv, LSP/Calf LV2), onnxruntime and the DNSMOS model
 #   ./install.sh --check      only report what's installed / missing (changes nothing)
 #   ./install.sh --no-deps    install voice2ee without touching system packages
 #   ./install.sh --venv       put numpy/scipy in a private virtualenv (if your distro's packages are missing/old)
@@ -18,15 +20,17 @@ BIN_DIR="$PREFIX/bin"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OS_RELEASE="${VOICE2EE_OS_RELEASE:-/etc/os-release}"   # overridable for testing
 
-CHECK_ONLY=0 NO_DEPS=0 USE_VENV=0 ASSUME_YES=0 UNINSTALL=0
+CHECK_ONLY=0 NO_DEPS=0 USE_VENV=0 ASSUME_YES=0 UNINSTALL=0 EDITION=""
 for arg in "$@"; do
   case "$arg" in
+    --minimal) EDITION=minimal ;;
+    --full) EDITION=full ;;
     --check) CHECK_ONLY=1 ;;
     --no-deps) NO_DEPS=1 ;;
     --venv) USE_VENV=1 ;;
     -y|--yes) ASSUME_YES=1 ;;
     --uninstall) UNINSTALL=1 ;;
-    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $arg (see --help)"; exit 2 ;;
   esac
 done
@@ -88,8 +92,69 @@ case "$FAMILY" in
   *)      PM=""; INSTALL=(); PKG=(python3 numpy scipy "pactl/parec (PulseAudio utils)" "pw-loopback/pw-play (PipeWire tools)" easyeffects ffmpeg) ;;
 esac
 
+# Full version: lilv python bindings + the LV2 plugins EasyEffects uses (LSP, Calf). Best-effort names outside
+# Arch/Debian/Fedora/openSUSE; --check always shows what's really missing.
+case "$FAMILY" in
+  arch)   FULL_PKG=(lilv lsp-plugins-lv2 calf) ;;
+  debian) FULL_PKG=(python3-lilv lsp-plugins-lv2 calf-plugins) ;;
+  fedora) FULL_PKG=(python3-lilv lsp-plugins-lv2 calf) ;;
+  suse)   FULL_PKG=(python3-lilv lsp-plugins-lv2 calf) ;;
+  void)   FULL_PKG=(python3-lilv lsp-plugins calf) ;;
+  alpine) FULL_PKG=(py3-lilv lsp-plugins-lv2 calf) ;;
+  gentoo) FULL_PKG=("media-libs/lilv[python]" media-plugins/lsp-plugins media-plugins/calf) ;;
+  solus)  FULL_PKG=(python-lilv lsp-plugins calf) ;;
+  nixos)  FULL_PKG=(python3Packages.lilv lsp-plugins calf) ;;
+  *)      FULL_PKG=("lilv python bindings" "LSP plugins (LV2)" "Calf plugins (LV2)") ;;
+esac
+DNSMOS_URL="https://github.com/microsoft/DNS-Challenge/raw/master/DNSMOS/DNSMOS/sig_bak_ovr.onnx"
+MODEL="$APP_DIR/models/sig_bak_ovr.onnx"
+
 echo "${B}voice2ee installer${N}  -  $PRETTY_NAME${FAMILY:+ ($FAMILY family, $PM)}"
 echo
+
+# ------------------------------------------------------------------------------------------------ edition
+explain_editions() {
+cat <<TXT
+${B}Which version do you want?${N}
+
+  ${B}1) Minimal${N}  - Python + numpy + scipy + the PipeWire tools. Nothing else to download.
+     ${G}+${N} Everything works: measuring, presets, tuning rounds, record-once, A/B picks and Optimise
+     ${G}+${N} Small and simple: fewest parts that can break, nothing extra to keep updated
+     ${Y}-${N} Optimise searches with a built-in ${B}approximate${N} model of the plugins. The first round
+       through EasyEffects confirms and corrects it, but the search itself is less precise
+     ${Y}-${N} A/B picks are rendered through EasyEffects: about 20 s to prepare each pick
+     ${B}Choose it if:${N} you use the EasyEffects Flatpak, want it light and quick, have an older or
+       slower PC, or simply want a good preset without extras. You can upgrade later.
+
+  ${B}2) Full${N}  - Minimal + lilv and the LSP/Calf LV2 plugins (usually already installed with a native
+     EasyEffects), onnxruntime in a private virtualenv (about 60 MB) and Microsoft's DNSMOS
+     speech-quality model (a few MB). Needs internet for the download.
+     ${G}+${N} Optimise runs your ${B}real${N} EasyEffects plugins offline: what it picks is what you hear
+     ${G}+${N} Instant A/B picks
+     ${G}+${N} A quality score trained on human listening ratings helps choose between candidates
+     ${Y}-${N} Bigger, more parts; onnxruntime comes from pip, not your distro
+     ${Y}-${N} Optimising takes a few minutes per preset
+     ${Y}-${N} With the EasyEffects ${B}Flatpak${N}, the plugins inside the Flatpak can be a different version
+       from the ones installed on your system, so "exact" becomes "very close"
+     ${B}Choose it if:${N} you have a native EasyEffects, want the best possible fit, re-tune often, or
+       use several mics or rooms.
+
+  Switch any time:  ./install.sh --full   or   ./install.sh --minimal
+TXT
+}
+if [ -z "$EDITION" ] && [ "$CHECK_ONLY" = 0 ] && [ "$UNINSTALL" = 0 ]; then
+  if [ -t 0 ] && [ "$ASSUME_YES" = 0 ]; then
+    explain_editions
+    while :; do
+      read -r -p "Choose [1 = Minimal / 2 = Full, Enter = 1]: " a || a=""
+      case "$a" in ""|1) EDITION=minimal; break ;; 2) EDITION=full; break ;; q|Q|quit|exit) exit 0 ;; esac
+    done
+    echo
+  else
+    EDITION=minimal
+    echo "(Not interactive: installing the Minimal version. Use --full for the Full version.)"
+  fi
+fi
 
 # ------------------------------------------------------------------------------------------------ checks
 MISSING_REQ=() MISSING_OPT=() PY=""
@@ -167,6 +232,28 @@ else
 fi
 
 echo
+echo "${B}Full version extras${N}${EDITION:+ (you chose: $EDITION)}"
+FULL_MISSING=() LILV_OK=0 LV2_OK=0 ORT_OK=0 MODEL_OK=0
+if [ -n "$PY" ] && "$PY" -c 'import lilv' 2>/dev/null; then LILV_OK=1; ok "lilv python bindings"
+else warn "lilv python bindings - needed for exact offline plugins"; FULL_MISSING+=("${FULL_PKG[0]}"); fi
+LSP_FOUND=0 CALF_FOUND=0
+LV="${LV2_PATH:-}"
+for d in ${LV//:/ } /usr/lib/lv2 /usr/lib64/lv2 /usr/local/lib/lv2 /usr/local/lib64/lv2 \
+         /usr/lib/x86_64-linux-gnu/lv2 /usr/lib/aarch64-linux-gnu/lv2 "$HOME/.lv2"; do
+  compgen -G "$d/lsp-plugins*.lv2" >/dev/null 2>&1 && LSP_FOUND=1
+  [ -d "$d/calf.lv2" ] && CALF_FOUND=1
+done
+if [ "$LSP_FOUND" = 1 ]; then ok "LSP plugins (LV2)"; else warn "LSP plugins (LV2)"; FULL_MISSING+=("${FULL_PKG[1]}"); fi
+if [ "$CALF_FOUND" = 1 ]; then ok "Calf plugins (LV2) - de-esser, exciter"
+else warn "Calf plugins (LV2) - de-esser, exciter"; FULL_MISSING+=("${FULL_PKG[2]}"); fi
+[ "$LSP_FOUND" = 1 ] && [ "$CALF_FOUND" = 1 ] && LV2_OK=1
+if { [ -x "$APP_DIR/venv/bin/python" ] && "$APP_DIR/venv/bin/python" -c 'import onnxruntime' 2>/dev/null; } ||
+   { [ -n "$PY" ] && "$PY" -c 'import onnxruntime' 2>/dev/null; }; then ORT_OK=1; ok "onnxruntime"
+else warn "onnxruntime - for the quality model (installed with pip into voice2ee's own virtualenv)"; fi
+if [ -s "$MODEL" ]; then MODEL_OK=1; ok "DNSMOS model"; else warn "DNSMOS model (downloaded by --full)"; fi
+[ "$EE_KIND" = flatpak ] && warn "EasyEffects is a Flatpak: offline plugins are your system's, which may differ in version"
+
+echo
 echo "${B}Optional${N} (only for running the tests)"
 if have ffmpeg; then
   FF_FILTERS="$(ffmpeg -hide_banner -filters 2>/dev/null || true)"
@@ -179,6 +266,9 @@ if [ "$CHECK_ONLY" = 1 ]; then
   if [ ${#MISSING_REQ[@]} -eq 0 ]; then echo "${G}All required dependencies are installed.${N}"
   else echo "Missing required packages: ${B}${MISSING_REQ[*]}${N}"; fi
   [ ${#MISSING_OPT[@]} -gt 0 ] && echo "Missing recommended/optional packages: ${MISSING_OPT[*]}"
+  if [ "$LILV_OK$LV2_OK$ORT_OK$MODEL_OK" = 1111 ]; then echo "Full version: ${G}everything present${N}"
+  else echo "Full version: missing ${FULL_MISSING[*]:-}$([ $ORT_OK = 0 ] && echo ' onnxruntime')$([ $MODEL_OK = 0 ] && echo ' DNSMOS-model')"
+       echo "  (run ./install.sh to see which version fits you)"; fi
   exit 0
 fi
 
@@ -198,6 +288,7 @@ if [ "$USE_VENV" = 1 ]; then
   MISSING_REQ=("${keep[@]}")
 fi
 
+[ "$EDITION" = full ] && MISSING_OPT+=("${FULL_MISSING[@]}")
 if [ "$NO_DEPS" = 0 ] && [ $(( ${#MISSING_REQ[@]} + ${#MISSING_OPT[@]} )) -gt 0 ]; then
   TO_INSTALL=("${MISSING_REQ[@]}" "${MISSING_OPT[@]}")
   if [ ${#INSTALL[@]} -gt 0 ]; then
@@ -229,19 +320,39 @@ cp "$SRC_DIR/voice2ee.py" "$SRC_DIR/README.md" "$APP_DIR/"
 find "$APP_DIR" -name '__pycache__' -prune -exec rm -rf {} +
 
 RUN_PY="$PY"
-if [ "$USE_VENV" = 1 ]; then
-  echo "  creating virtualenv with numpy + scipy (needs internet)..."
-  if "$PY" -m venv "$APP_DIR/venv" && "$APP_DIR/venv/bin/pip" install --quiet --upgrade pip numpy scipy; then
+VENV_PKGS=()
+[ "$USE_VENV" = 1 ] && VENV_PKGS+=(numpy scipy)
+[ "$EDITION" = full ] && VENV_PKGS+=(onnxruntime)
+if [ ${#VENV_PKGS[@]} -gt 0 ]; then
+  # --system-site-packages: the venv still sees your distro's numpy/scipy and lilv
+  echo "  setting up voice2ee's own virtualenv with: ${VENV_PKGS[*]} (needs internet)..."
+  if "$PY" -m venv --system-site-packages "$APP_DIR/venv" &&
+     "$APP_DIR/venv/bin/pip" install --quiet --disable-pip-version-check "${VENV_PKGS[@]}"; then
     RUN_PY="$APP_DIR/venv/bin/python"; ok "virtualenv ready"
   else
-    bad "couldn't create the virtualenv (is python3-venv / python3-pip installed?)"; exit 1
+    if [ "$USE_VENV" = 1 ]; then bad "couldn't create the virtualenv (is python3-venv / python3-pip installed?)"; exit 1; fi
+    warn "couldn't install onnxruntime (no internet, no python3-venv/pip, or no wheel for Python $("$PY" -c 'import platform; print(platform.python_version())'))"
+    warn "  -> the quality model stays off; everything else in the Full version still works"
+    [ -x "$APP_DIR/venv/bin/python" ] && RUN_PY="$APP_DIR/venv/bin/python"
+  fi
+elif [ "$EDITION" = minimal ] && [ -d "$APP_DIR/venv" ]; then
+  rm -rf "$APP_DIR/venv" "$APP_DIR/models"; ok "removed the Full version's extras (virtualenv, model)"
+fi
+
+if [ "$EDITION" = full ] && [ ! -s "$MODEL" ]; then
+  echo "  downloading the DNSMOS speech-quality model (Microsoft DNS Challenge)..."
+  mkdir -p "$APP_DIR/models"
+  if { have curl && curl -fsSL "$DNSMOS_URL" -o "$MODEL.part"; } || { have wget && wget -q "$DNSMOS_URL" -O "$MODEL.part"; }; then
+    mv "$MODEL.part" "$MODEL"; ok "DNSMOS model ready"
+  else
+    rm -f "$MODEL.part"; warn "couldn't download the model - the quality score stays off (run ./install.sh --full again later)"
   fi
 fi
 
 cat > "$BIN_DIR/voice2ee" <<EOF
 #!/bin/sh
 # voice2ee launcher (installed by install.sh)
-exec "$RUN_PY" "$APP_DIR/voice2ee.py" "\$@"
+VOICE2EE_DATA="$APP_DIR" exec "$RUN_PY" "$APP_DIR/voice2ee.py" "\$@"
 EOF
 chmod +x "$BIN_DIR/voice2ee"
 ok "command installed: $BIN_DIR/voice2ee"
@@ -255,4 +366,9 @@ case ":$PATH:" in
      echo "      export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
 echo
-echo "Done. Start EasyEffects, then run:  ${B}voice2ee${N}   (voice2ee --help for options)"
+if [ "$EDITION" = full ]; then
+  echo "Checking the Full version (runs your LV2 plugins once in a separate process)..."
+  VOICE2EE_DATA="$APP_DIR" "$RUN_PY" "$APP_DIR/voice2ee.py" --check-full || true
+fi
+echo
+echo "Done (${EDITION:-minimal} version). Start EasyEffects, then run:  ${B}voice2ee${N}   (voice2ee --help for options)"

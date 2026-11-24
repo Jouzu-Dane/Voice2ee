@@ -19,6 +19,11 @@ sounds right.
   that push peaks past the limiter, such as the limiter's *Threshold Boost*.
 - 🔁 **Record once:** record yourself once, and every tuning round replays that recording through EasyEffects.
   No talking, and every round hears identical speech.
+- 🧪 **Optimise:** tries a few hundred variations of the preset on your recording and keeps the best, judged
+  by a scorecard (loudness, clicks, knocks, words kept, tone, sibilance, background noise)
+- 🅰️🅱️ **A/B picks:** pick the better of two versions about 12 times; voice2ee learns your taste and saves it
+- 📦 **Minimal or Full:** the small version needs only numpy and scipy; the Full version runs your real plugins
+  offline and adds a speech-quality model (see [Minimal or Full](#minimal-or-full))
 - 🗂️ **Versioned presets:** `name_v1` → `name_v1-1`, `name_v1-2`, … → `name_v2`. Nothing is overwritten.
 
 ---
@@ -27,10 +32,13 @@ sounds right.
 
 - [Requirements](#requirements)
 - [Installation](#installation)
+- [Minimal or Full](#minimal-or-full)
 - [Quick start](#quick-start)
 - [Profiles: Stream and Record](#profiles-stream-and-record)
 - [How it works](#how-it-works)
+- [Optimise and A/B picks](#optimise-and-ab-picks)
 - [Feedback keys](#feedback-keys)
+- [Locks and ranges](#locks-and-ranges)
 - [Command-line options](#command-line-options)
 - [Files and locations](#files-and-locations)
 - [Troubleshooting](#troubleshooting)
@@ -73,14 +81,18 @@ cd voice2ee
 
 The installer:
 
-1. Detects your distro and checks every dependency.
-2. Offers to install missing packages with your package manager. It asks first, and this is the only step
+1. Asks whether you want the **Minimal** or the **Full** version, and explains when each makes sense.
+2. Detects your distro and checks every dependency.
+3. Offers to install missing packages with your package manager. It asks first, and this is the only step
    that uses `sudo`.
-3. Installs voice2ee for your user, into `~/.local/share/voice2ee`, with a `voice2ee` command in `~/.local/bin`.
+4. Installs voice2ee for your user, into `~/.local/share/voice2ee`, with a `voice2ee` command in `~/.local/bin`.
+   For the Full version it also sets up a private virtualenv with onnxruntime and downloads the DNSMOS model.
 
 | Command | What it does |
 |---|---|
-| `./install.sh --check` | Only report what's installed or missing |
+| `./install.sh --minimal` | Install the Minimal version (no questions about the edition) |
+| `./install.sh --full` | Install the Full version |
+| `./install.sh --check` | Only report what's installed or missing, for both versions |
 | `./install.sh --no-deps` | Install the tool without touching system packages |
 | `./install.sh --venv` | Get numpy and scipy from pip in a private virtualenv |
 | `./install.sh --yes` | Don't ask before installing packages |
@@ -92,6 +104,29 @@ The installer:
 ```bash
 python3 voice2ee.py
 ```
+
+## Minimal or Full
+
+Both versions have every feature. The Full version does the heavy parts better.
+
+| | **Minimal** | **Full** |
+|---|---|---|
+| Needs | Python, numpy, scipy, PipeWire tools | + lilv and the LSP/Calf LV2 plugins (usually already there with a native EasyEffects), onnxruntime (~60 MB, from pip into voice2ee's own virtualenv), the DNSMOS model (a few MB) |
+| Optimise | searches with a built-in **approximate** model of the plugins; the first round through EasyEffects confirms and corrects it | runs your **real** plugins offline: what it picks is what you hear |
+| A/B picks | rendered through EasyEffects: about 20 s to prepare each pick | instant |
+| Quality score | – | DNSMOS, a model trained on human listening ratings, helps choose between candidates |
+| Download | nothing extra | needs internet once |
+
+**Choose Minimal if** you use the EasyEffects Flatpak, want it light and quick, have an older or slower PC, or
+just want a good preset without extras.
+**Choose Full if** you have a native EasyEffects, want the best possible fit, re-tune often, or use several mics or
+rooms.
+
+Switch any time with `./install.sh --full` or `./install.sh --minimal`. `voice2ee --check-full` shows which Full
+parts are installed and runs your plugins once in a separate process, so a broken plugin can't crash the tool.
+
+> With the EasyEffects **Flatpak**, the plugins inside the Flatpak can be a different version from the ones on your
+> system, so the Full version's "exact" becomes "very close". The confirmation round catches any difference.
 
 ## Quick start
 
@@ -300,6 +335,65 @@ test_v2          ← saved when you finish (q / quit / exit)
 Run numbers continue after existing files, and finishing always uses the next free version. Existing presets are
 never modified. A preset without a version (`my-voice`) is treated as v1.
 
+## Optimise and A/B picks
+
+### Optimise (step 2)
+
+After measuring your voice (New mode), voice2ee asks how to fit the first preset:
+
+```
+  1) Quick     - measure and predict (a few seconds), then refine in rounds
+  2) Optimise  - try a few hundred variations on your recording and keep the best, then refine in rounds
+```
+
+Optimise asks **what matters most**, then varies the settings of the modules you picked around the measured
+preset and scores each try on your own recording:
+
+| Goal | Leans towards |
+|---|---|
+| Balanced (default) | everything equally |
+| Loud keyboard | clicks and knocks gone, even at some naturalness cost |
+| Natural | fewest artefacts, keeps room and breaths |
+| Broadcast | dense, even, up-front voice |
+| Clarity | intelligibility first (calls, teaching) |
+
+The scorecard:
+
+| Part | How it's measured |
+|---|---|
+| Loudness | LUFS vs the profile's target |
+| Clicks, knocks | what's left of your click and knock recordings, vs your speech |
+| Words kept | ESTOI intelligibility of processed vs raw speech: drops when word endings get cut |
+| Tone | spectrum vs the target curve (moved by your saved taste) |
+| Sibilance, background noise | as in the round reports |
+| Quality (Full) | DNSMOS overall score, 1-5 |
+| Hard limits | peaks over the ceiling or more gain than allowed reject a try outright |
+
+The search is a small evolution strategy: it tries variations around the best so far, searches wider while it
+keeps improving and narrower when it doesn't. Typical run: 200 tries with the approximate model (about 2–3
+minutes), 300 with the real plugins. The result is then loaded and confirmed in a normal round through
+EasyEffects. RNNoise and the Deep noise remover can't run offline, so they're judged in that round.
+
+### A/B picks (step 3)
+
+You hear version A, then version B: same sentence, same loudness, random order. Press `a` or `b` for the better
+one (`s` = can't tell, `x` = both bad, `r` = play again, `q` = stop). Each pair differs along up to five
+**taste directions**:
+
+| Direction | What changes |
+|---|---|
+| Brightness | presence, 2–6 kHz |
+| Warmth | body, 120–400 Hz |
+| Polish | compression: even and dense vs natural dynamics |
+| Cleanliness | noise removal: silent background vs open and natural |
+| Air | top end above 7 kHz (and the exciter, if on) |
+
+A Bayesian preference model estimates where your taste sits and places the next pair where it's still least sure,
+so about 12 picks are enough. The result moves the preset and is **saved** (`~/.config/voice2ee/taste.json`):
+new presets start from it and Optimise aims for it. Use `--no-taste` to ignore it.
+
+Choose A/B picks at the start of fine-tuning, or press `a` in any round.
+
 ## Feedback keys
 
 After each round, type one or more keys (e.g. `b c`), or the word in brackets:
@@ -319,11 +413,32 @@ After each round, type one or more keys (e.g. `b c`), or the word in brackets:
 | `m` | mouth clicks / lip smacks | stronger de-esser, faster gate release |
 | `k` | desk knocks / taps | tap catcher: lower threshold, higher ratio, wider band |
 | `+` / `-` | more / fewer EQ bands | re-spaces the EQ (New mode only) |
+| `a` | A/B picks | about 12 picks between two versions; learns and saves your taste |
 | *Enter* | measure again | |
 | `q` `quit` `exit` | happy: save and finish | |
 
 `q`, `quit` and `exit` work at **every** prompt, in any letter case. Anything you type during a recording is hidden
 and thrown away.
+
+## Locks and ranges
+
+Keep any setting fixed, or within limits, by creating `~/.config/voice2ee/overrides.toml` (Python 3.11+) or
+`overrides.json`:
+
+```toml
+[lock]
+limiter = -3.0            # always -3 dBFS
+"gate.release" = 120      # ms
+
+[range]
+"comp.ratio" = [1.5, 3.0]
+"eq.hpf" = [80, 110]
+```
+
+Locks and ranges are respected by the first preset, every automatic adjustment, every feedback key, Optimise and
+A/B picks. Common paths: `limiter`, `gate.thr`, `gate.release`, `gate.ratio`, `floor.thr`, `deep.atten`,
+`taps.thr`, `taps.ratio`, `eq.hpf`, `comp.thr`, `comp.ratio`, `comp.makeup`, `comp.release`, `comp2.thr`,
+`comp2.ratio`, `deess.thr`, `deess.ratio`, `deess2.thr`, `deess2.ratio`, `exciter.amount`, `exciter.scope`.
 
 ## Command-line options
 
@@ -348,6 +463,13 @@ and thrown away.
 | `--no-click-test` | | skip the keyboard/mouse recording |
 | `--no-tap-test` | | skip the desk-knock recording |
 | `--tap-secs N` | 5 | length of the desk-knock recording |
+| `--engine {quick,optimise}` | asked | (mode 1) how the first preset is fitted |
+| `--goal NAME` | asked | Optimise goal: `balanced`, `keyboard`, `natural`, `broadcast`, `clarity` |
+| `--trials N` | 300 / 200 | Optimise tries (real plugins / approximate model) |
+| `--finetune {keys,ab,both}` | asked | feedback keys, A/B picks first, or both |
+| `--no-taste` | | don't start from your saved taste |
+| `--no-quality` | | don't use the quality model even if installed |
+| `--check-full` | | show which Full-version parts are installed and work |
 
 Fine-tuning options: `--box-cut`, `--makeup`, `--gate-offset`, `--no-vad`, `--vad-thres`, `--noise-secs`,
 `--speech-secs`, `--click-secs`, `--base`. See `voice2ee --help`.
@@ -359,7 +481,9 @@ Fine-tuning options: `--box-cut`, `--makeup`, `--gate-offset`, `--no-vad`, `--va
 | `~/.local/share/easyeffects/input/` | your presets (Flatpak: `~/.var/app/com.github.wwmm.easyeffects/data/easyeffects/input/`) |
 | `~/.cache/voice2ee/take/` | the recording used by record-once mode |
 | `~/.cache/voice2ee/state.json` | the session, for `--resume` |
-| `~/.local/share/voice2ee/` | the installed tool |
+| `~/.local/share/voice2ee/` | the installed tool (Full: also `venv/` and `models/`) |
+| `~/.config/voice2ee/taste.json` | your taste from A/B picks |
+| `~/.config/voice2ee/overrides.toml` | your locks and ranges (optional) |
 
 ## Troubleshooting
 
@@ -413,6 +537,13 @@ v2ee/
   session.py         versioned names, saved state
   term.py            prompts, quit handling, hidden keys
   config.py          constants and targets
+  fit.py             Quick/Optimise, goals, fine-tune choice, A/B renderers, Full-version status
+  search.py          what Optimise may change, locks/ranges, the optimiser
+  score.py           the scorecard, ESTOI, goals
+  offline.py         offline chains: approximate (built-in) and exact (your LV2 plugins via lilv)
+  simchain.py        the approximate plugin models
+  taste.py           A/B picks, taste directions, preference model, saved taste
+  quality.py         DNSMOS (optional, Full version)
 tests/               test suite (simulated EasyEffects chain, fake PipeWire tools, fake EasyEffects server)
 ```
 
@@ -433,6 +564,10 @@ keyboard clicks, at a real mic's levels. Tests that need it are skipped if ffmpe
   release times, a dull voice gets a low exciter start and a bright one starts above the "s", rumble steepens the
   high-pass
 - versioning
+- Optimise improving the score within the limits, locks and ranges respected everywhere, ESTOI, the scorecard
+- A/B picks: a simulated listener's hidden taste is found, A/B through (fake) EasyEffects, the `a` key
+- the exact LV2 host against a fake lilv (unit conversion, choices by label, atom ports, latency), the DNSMOS
+  wrapper against a fake model, and the installer's Minimal/Full modes
 - profiles, gate + expander order, tap catcher (knocks down ≥ 6 dB, voice bass unchanged), stereo fix, Deep noise
   remover detection, importing presets that use the new plugins
 - quit words
@@ -441,7 +576,12 @@ keyboard clicks, at a real mic's levels. Tests that need it are skipped if ffmpe
 
 ## Known limitations
 
-- **The test simulator doesn't model the Deep noise remover** (it's treated as pass-through in the tests).
+- **Offline, RNNoise and the Deep noise remover pass through** (they aren't LV2 plugins), so Optimise judges them
+  in the confirmation round through EasyEffects.
+- **The exact LV2 host is new:** the port names come from how EasyEffects binds its settings. `voice2ee
+  --check-full` lists any setting a plugin on your system doesn't accept; please open an issue with those lines.
+- **DNSMOS** was trained on general speech (calls and conferencing), not on streaming voices specifically. It's one
+  part of the scorecard, not the judge.
 - **EasyEffects can't host other plugins:** only its built-in effects (and DeepFilterNet through its own module).
 - **Read-back:** the first load checks every number and switch of every plugin (about 150 settings); later rounds
   check the on/off states and the values the tuner changes. Text options (modes) aren't compared, because the

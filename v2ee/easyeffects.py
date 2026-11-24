@@ -484,6 +484,8 @@ def import_preset(js):
 
 
 def write_preset(P, name, out, base=None):
+    from .search import apply_overrides
+    apply_overrides(P)                         # your locks/ranges always win (overrides.toml / .json)
     if isinstance(base, (str, Path)):
         base = json.loads(Path(base).expanduser().read_text())
     if P.get("imported"):

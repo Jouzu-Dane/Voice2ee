@@ -1,7 +1,12 @@
 """Shared helpers for the tests: package import, test speech, simulated chain."""
 import subprocess
 import sys
+import os
+import tempfile
 import types
+
+os.environ.setdefault("VOICE2EE_CONFIG", tempfile.mkdtemp(prefix="v2ee_cfg_"))
+os.environ.setdefault("VOICE2EE_DATA", tempfile.mkdtemp(prefix="v2ee_data_"))
 from pathlib import Path
 
 import numpy as np

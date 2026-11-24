@@ -222,13 +222,14 @@ FEEDBACK_HELP = """  What do you hear?  (several allowed, e.g. "b c")
     u too quiet    l too loud   e echoey/roomy (room tails between words)
     p plosives/pops still get through     m mouth clicks / lip smacks     k desk knocks / taps
     + more EQ bands (finer detail)       - fewer EQ bands
+    a A/B picks: choose the better of two versions (learns and saves your taste)
   Enter = measure again      q / quit / exit = I'm happy: save the result and finish"""
 
 WORDS = {"boxy": "b", "muddy": "b", "thin": "t", "dull": "d", "muffled": "d", "harsh": "h", "bright": "h",
          "sibilant": "s", "clicks": "c", "chop": "w", "chopped": "w", "quiet": "u", "loud": "l",
          "more": "+", "fewer": "-", "pops": "p", "plosives": "p", "mouth": "m", "smacks": "m",
          "echo": "e", "echoey": "e", "roomy": "e", "reverb": "e", "knocks": "k", "taps": "k", "thumps": "k",
-         "bumps": "k"}
+         "bumps": "k", "ab": "a", "a/b": "a"}
 
 
 def parse_feedback(text):
@@ -236,7 +237,7 @@ def parse_feedback(text):
     for w in text.lower().replace(",", " ").split():
         if w in WORDS:
             toks.append(WORDS[w])
-        elif all(ch in "btdhscwulepmk+-" for ch in w):
+        elif all(ch in "btdhscwulepmka+-" for ch in w):
             toks += list(w)
         else:
             bad += 1

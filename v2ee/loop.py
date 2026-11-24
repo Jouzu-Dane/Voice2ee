@@ -5,6 +5,7 @@ import numpy as np
 
 from . import easyeffects as ee
 from .config import SAFETY_MARGIN, prof
+from .search import apply_overrides
 from .session import Session, next_version, save_state
 from .term import ask
 from .tuning import FEEDBACK_HELP, auto_adjust, manual_feedback, parse_feedback, region_summary, target_lufs
@@ -84,8 +85,27 @@ def report(P, a):
         print(f"vs target (dB): {region_summary(P, a)}   [{len(P['eq']['bands']) + 1} EQ bands]")
 
 
-def tune_loop(P, sess, measure, base=None, base_file=None, raw=None, test_mode="live"):
-    """measure(): returns an analysis of the CURRENT EasyEffects output (live talking or replayed recording)."""
+def _ab_round(P, sess, base, ab):
+    """Run A/B picks and move the preset to your taste. Returns the new run name or None."""
+    from .taste import apply_taste, describe
+    if ab is None:
+        print("(A/B picks need a recording of your voice - record once (mode 1, or 'record your raw voice' in "
+              "mode 2) to use them.)")
+        return None
+    t, picks = ab(P)
+    if not picks or not any(abs(v) >= 0.05 for v in t.values()):
+        return None
+    new = apply_taste(P, t)
+    P.clear(); P.update(new)
+    run = sess.new_run()
+    _write_and_load(P, sess, run, base)
+    print(f"  you: moved to your taste ({describe(t)})")
+    return run
+
+
+def tune_loop(P, sess, measure, base=None, base_file=None, raw=None, test_mode="live", ab=None, start_ab=False):
+    """measure(): returns an analysis of the CURRENT EasyEffects output (live talking or replayed recording).
+    ab: optional A/B runner (fit.make_ab_runner); start_ab: begin with A/B picks before the first round."""
     print("\nHeads-up: turn your headphone/speaker volume down a notch before the preset loads.")
     if P["modules"]["comp"] and not P["modules"]["limiter"]:
         print("!! This chain has compressors but no limiter, so sudden loud peaks are not capped.")
@@ -98,6 +118,11 @@ def tune_loop(P, sess, measure, base=None, base_file=None, raw=None, test_mode="
               "the Threshold Boost check still apply.)")
     rnd, prev_sig, prev_changed, prev_mk, warned_mono = 0, None, False, None, False
     replay = test_mode == "replay"
+    if start_ab:
+        r = _ab_round(P, sess, base, ab)
+        if r:
+            sess.pending = r
+            save_state(P, sess, base_file, raw, test_mode)
     while True:
         rnd += 1
         if sess.pending and not _ask_keep(sess):
@@ -132,6 +157,7 @@ def tune_loop(P, sess, measure, base=None, base_file=None, raw=None, test_mode="
                 msgs = []
             else:
                 msgs = auto_adjust(P, a)
+            msgs += [f"(your lock) {x}" for x in apply_overrides(P)]
             for mm in msgs:
                 print("  auto:", mm)
             if not msgs and not stuck:
@@ -145,6 +171,11 @@ def tune_loop(P, sess, measure, base=None, base_file=None, raw=None, test_mode="
         fb = ask("> ", quit_raises=False)
         if fb != "q":
             toks = parse_feedback(fb)
+            if "a" in toks:
+                toks = [t for t in toks if t != "a"]
+                r = _ab_round(P, sess, base, ab)
+                if r:
+                    prev_changed, this_run = True, r
             if toks:
                 before = _snapshot(P)
                 for mm in manual_feedback(P, toks):
