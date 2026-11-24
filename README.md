@@ -7,24 +7,24 @@ complete [EasyEffects](https://github.com/wwmm/easyeffects) input preset fitted 
 noise. It then keeps measuring what comes out of EasyEffects and adjusts the preset, with your feedback, until it
 sounds right.
 
-- 🎬 **Two profiles:** *Stream* (finished live sound, -18 LUFS, peaks under -6 dBFS) and *Record* (for lossless
-  video recordings you edit later: natural dynamics, headroom, gentle cleanup)
-- 🎚️ **Loudness in LUFS**, the same measure loudness meters and platforms use
-- ⌨️ **Keyboard and mouse noise** handled by a gate, an expander, or both, calibrated on your actual clicks, plus
+- **Three profiles:** *Stream* (finished live sound), *Video* (ready to publish straight out of OBS, minimal
+  editing) and *Record* (lossless recordings you finish in an editor)
+- **Loudness in LUFS**, the same measure loudness meters and platforms use
+- **Keyboard and mouse noise** handled by a gate, an expander, or both, calibrated on your actual clicks, plus
   RNNoise and/or the neural **Deep noise remover** (DeepFilterNet)
-- 🪵 **Desk knocks and mug thumps** tamed by a tap catcher that only compresses the bass band, set from a
+- **Desk knocks and mug thumps** tamed by a tap catcher that only compresses the bass band, set from a
   recording of your actual knocks
-- 🐍 **Plosives and sibilance** handled by a steep high-pass, and two de-essers (wide, plus a narrow one for a "snake S")
-- 🛡️ **Gain safety:** never adds more than 12 dB to your voice (measured, not guessed). It also catches settings
+- **Plosives and sibilance** handled by a steep high-pass, and two de-essers (wide, plus a narrow one for a "snake S")
+- **Gain safety:** never adds more than 12 dB to your voice (measured, not guessed). It also catches settings
   that push peaks past the limiter, such as the limiter's *Threshold Boost*.
-- 🔁 **Record once:** record yourself once, and every tuning round replays that recording through EasyEffects.
+- **Record once:** record yourself once, and every tuning round replays that recording through EasyEffects.
   No talking, and every round hears identical speech.
-- 🧪 **Optimise:** tries a few hundred variations of the preset on your recording and keeps the best, judged
+- **Optimise:** tries a few hundred variations of the preset on your recording and keeps the best, judged
   by a scorecard (loudness, clicks, knocks, words kept, tone, sibilance, background noise)
-- 🅰️🅱️ **A/B picks:** pick the better of two versions about 12 times; voice2ee learns your taste and saves it
-- 📦 **Minimal or Full:** the small version needs only numpy and scipy; the Full version runs your real plugins
+- **A/B picks:** pick the better of two versions about 12 times; voice2ee learns your taste and saves it
+- **Minimal or Full:** the small version needs only numpy and scipy; the Full version runs your real plugins
   offline and adds a speech-quality model (see [Minimal or Full](#minimal-or-full))
-- 🗂️ **Versioned presets:** `name_v1` → `name_v1-1`, `name_v1-2`, … → `name_v2`. Nothing is overwritten.
+- **Versioned presets:** `name_v1` → `name_v1-1`, `name_v1-2`, … → `name_v2`. Nothing is overwritten.
 
 ---
 
@@ -34,7 +34,7 @@ sounds right.
 - [Installation](#installation)
 - [Minimal or Full](#minimal-or-full)
 - [Quick start](#quick-start)
-- [Profiles: Stream and Record](#profiles-stream-and-record)
+- [Profiles: Stream, Video and Record](#profiles-stream-video-and-record)
 - [How it works](#how-it-works)
 - [Optimise and A/B picks](#optimise-and-ab-picks)
 - [Feedback keys](#feedback-keys)
@@ -74,7 +74,7 @@ On any other distro it tells you what to install.
 ## Installation
 
 ```bash
-git clone https://github.com/YOUR-USER/voice2ee.git
+git clone https://github.com/Jouzu-Dane/voice2ee.git
 cd voice2ee
 ./install.sh
 ```
@@ -83,10 +83,14 @@ The installer:
 
 1. Asks whether you want the **Minimal** or the **Full** version, and explains when each makes sense.
 2. Detects your distro and checks every dependency.
-3. Offers to install missing packages with your package manager. It asks first, and this is the only step
-   that uses `sudo`.
+3. Lists every missing package with what it's for, and offers to install them with your package manager. It
+   asks first, and this is the only step that uses `sudo`. (Full version on Arch/CachyOS: `python-lilv`,
+   `lsp-plugins-lv2`, `calf`; on Debian/Ubuntu: `python3-lilv`, `lsp-plugins-lv2`, `calf-plugins`.)
 4. Installs voice2ee for your user, into `~/.local/share/voice2ee`, with a `voice2ee` command in `~/.local/bin`.
-   For the Full version it also sets up a private virtualenv with onnxruntime and downloads the DNSMOS model.
+   For the Full version it asks before setting up a private virtualenv with onnxruntime and before downloading
+   the DNSMOS model.
+5. Checks everything again at the end. If a part is still missing, it tells you exactly which command fixes it;
+   until then voice2ee does that part the Minimal way.
 
 | Command | What it does |
 |---|---|
@@ -96,7 +100,7 @@ The installer:
 | `./install.sh --no-deps` | Install the tool without touching system packages |
 | `./install.sh --venv` | Get numpy and scipy from pip in a private virtualenv |
 | `./install.sh --yes` | Don't ask before installing packages |
-| `./install.sh --uninstall` | Remove voice2ee (your presets and recordings are kept) |
+| `./install.sh --uninstall` | Remove voice2ee, incl. the Full version's virtualenv and model (your presets, recording, taste and locks are kept) |
 | `PREFIX=/opt/voice2ee ./install.sh` | Install somewhere else |
 
 **Without installing**, you can run it straight from the clone:
@@ -148,28 +152,47 @@ parts are installed and runs your plugins once in a separate process, so a broke
 4. In OBS, use the **EasyEffects mic** (`easyeffects_source`) and turn OBS's own noise suppression off.
    For the Record profile, see [Recording video](#recording-video).
 
-> 🎧 Turn your headphones down a notch before the first round.
+> Turn your headphones down a notch before the first round.
 
 **Continue later** with `voice2ee --resume`.
 
-## Profiles: Stream and Record
+## Profiles: Stream, Video and Record
 
-| | **Stream** | **Record** |
-|---|---|---|
-| For | Twitch, Discord, voice chat: sounds finished the moment it leaves your PC | Video recorded losslessly (e.g. PCM 32-bit float) and edited later |
-| Loudness target | -18 LUFS | -24 LUFS (you normalise in your editor) |
-| Peaks | under -6 dBFS | under -6 dBFS, safety limiter at -1 dBFS |
-| Noise stage (default) | gate + expander, firm (-40 dB in silence) | expander only, gentle (-20 dB) |
-| Noise remover (default) | Deep noise remover if installed, otherwise RNNoise with VAD | Deep noise remover at a gentle 15 dB if installed, otherwise off |
-| Compression | leveler + fast peak compressor (+ density step if needed) | gentle leveler only |
-| EQ / de-essing | full strength | 70–75 % strength, so the voice stays natural |
+**Quick rule:** you go live → **Stream**. You upload what you recorded → **Video**. You edit the audio
+afterwards → **Record**.
 
-Why so different? A stream can't be fixed afterwards, so it's processed to sound finished. A recording will be
-edited, so the preset only fixes what's hard to fix later (rumble, boxiness, harsh "s", knocks) and leaves dynamics
-and room for your editor. Heavy noise removal and squashing can't be undone in post; a little noise can be removed
-there with better offline tools.
+| | **Stream** | **Video** (ready to publish) | **Record** (edited later) |
+|---|---|---|---|
+| For | Twitch, Discord, voice chat | videos that need (almost) no audio editing | videos you finish in DaVinci Resolve etc. |
+| Idea | sounds finished the moment it leaves your PC | finished sound straight out of OBS | fixes only what's hard to fix later; you do the rest |
+| Loudness | -18 LUFS | **-16 LUFS** (spoken YouTube level; YouTube plays at about -14) | about -24 LUFS, normalise later |
+| Peaks | under -6 dBFS (OBS-friendly) | **true peak** at most -1 dBTP, measured with 4× oversampling | under -6 dBFS, safety limiter at -1 |
+| Evenness | strongest compression, + density step if needed | aims for a **loudness range of 5–8 LU**: even, not squashed | natural dynamics |
+| Noise stage (default) | gate + expander, firm (-40 dB in silence) | gate + expander, gentle (-25 dB), no audible cutting | expander only, gentle (-20 dB) |
+| Noise remover (default) | RNNoise with voice detection | RNNoise without voice detection | RNNoise without voice detection |
+| Noise stage timing | closes before the room echo ends | closes after word tails, never mid-word | keeps word tails |
+| EQ / de-essing | full strength | full strength | 70–75 % strength |
+| Gain cap (default) | +12 dB | +16 dB (it's louder) | +12 dB |
+| Undo later? | – | no: processing is baked in, keep a raw track | yes, nearly everything |
 
-### Recording video
+Why so different? A stream can't be fixed afterwards, so it's processed to sound finished. A video for upload is
+the same idea, but for a viewer listening closely with headphones: louder, evener and cleaner, yet without the
+hard gating and squashing that are acceptable live. A recording you'll edit only gets what's hard to fix later
+(rumble, boxiness, harsh "s", knocks); dynamics and room are left for your editor, because heavy noise removal and
+squashing can't be undone.
+
+### Recording a video, ready to publish (Video)
+
+- **OBS:** *Settings → Output → Recording*: MKV (remux to MP4 afterwards) or MP4, audio AAC 320 kbps, or PCM if you
+  still want lossless.
+- **Strongly recommended:** your **raw mic on a second audio track** (*Advanced Audio Properties → Tracks*). The
+  processing is baked into track 1; track 2 lets you redo a take's sound if something ever goes wrong.
+- **Game audio or music:** keep it about 10–15 dB under your voice in OBS. Its level isn't part of this preset.
+- **Still worth doing in the edit:** cut mistakes and long pauses. The voice itself needs no further processing.
+- **What a preset can't fix:** room echo (EasyEffects has no real echo remover; get closer to the mic, add soft
+  furnishings), and breaths and lip smacks are quieter but not gone.
+
+### Recording video to edit later (Record)
 
 - **OBS:** *Settings → Output → Output Mode: Advanced → Recording*: format **MKV** (or MOV), audio encoder **PCM
   32-bit float** (the exact label varies a little by OBS version). It stores exactly what EasyEffects outputs and
@@ -241,9 +264,10 @@ noise much better than RNNoise, with fewer artefacts. EasyEffects needs its LADS
 | Others (native EasyEffects) | Download `libdeep_filter_ladspa-<version>-x86_64-unknown-linux-gnu.so` from the [DeepFilterNet releases](https://github.com/Rikorose/DeepFilterNet/releases), copy it to `/usr/lib64/ladspa/libdeep_filter_ladspa.so` (Fedora, openSUSE) or `/usr/lib/ladspa/libdeep_filter_ladspa.so` (others), restart EasyEffects |
 | Flatpak | Check whether EasyEffects shows the Deep noise remover as available; if not, see the EasyEffects docs for your version |
 
-voice2ee detects it: when it's installed, the Deep noise remover becomes the default remover and RNNoise's voice
-detection is turned off (combining them can cut words). Its attenuation limit is 40 dB (Stream) or 15 dB (Record);
-`c` raises it, `w` lowers it.
+RNNoise is the default remover in every profile; pick the Deep noise remover with item 2 in the module checklist
+(voice2ee shows whether DeepFilterNet is installed). When it's on, RNNoise's voice detection is turned off
+(combining them can cut words). Its attenuation limit is 40 dB (Stream), 25 dB (Video) or 15 dB (Record); `c`
+raises it, `w` lowers it.
 
 ### Plugin settings
 
@@ -258,8 +282,16 @@ Every option of every plugin is written explicitly, so nothing silently falls ba
 
 ### The first preset (New mode)
 
-voice2ee records 4 s of room tone, 20 s of you reading a passage, 6 s of you typing and clicking, and 5 s of you
-knocking on the desk (skipped if the tap catcher is off). From that it measures:
+voice2ee records 4 s of room tone, then your speech in two parts (the same for every profile):
+
+1. **About 35 s of free talk**, like you do on stream or in a video: normal energy, with a quiet moment, an excited
+   moment and a natural pause to think. This gives the real dynamics, pauses and level swings.
+2. **About 12 s of three short test sentences**, packed with "s", "sh", "p", "b" and "t" sounds, so the de-essers
+   and pop control always have enough to measure.
+
+Then 6 s of you typing and clicking, and 5 s of you knocking on the desk (skipped if the tap catcher is off).
+`--speech-test read` (a passage, 20 s) or `--speech-test free` (free talk only) are the alternatives. From all of
+that it measures:
 
 | Measurement | Used for |
 |---|---|
@@ -267,6 +299,7 @@ knocking on the desk (skipped if the tap catcher is off). From that it measures:
 | Your keyboard/mouse clicks vs your quietest speech | gate/expander threshold (set between them) |
 | Your desk knocks vs your voice's loudest bass | tap catcher threshold |
 | How long a knock rings | tap catcher release |
+| Thinking pauses (> 1 s): the background in them, and how loud the first word after one is | noise stage threshold, peak compressor attack (also checked every round) |
 | Left/right balance | automatic mono fix |
 | Pitch | high-pass frequency |
 | Rumble in the room and how strong your pops are | high-pass slope (18 or 24 dB/oct) and a few Hz higher with rumble |
@@ -366,12 +399,16 @@ The scorecard:
 | Words kept | ESTOI intelligibility of processed vs raw speech: drops when word endings get cut |
 | Tone | spectrum vs the target curve (moved by your saved taste) |
 | Sibilance, background noise | as in the round reports |
+| Loudness range (Video) | EBU loudness range vs 5–8 LU |
 | Quality (Full) | DNSMOS overall score, 1-5 |
-| Hard limits | peaks over the ceiling or more gain than allowed reject a try outright |
+| Hard limits | peaks over the ceiling, true peaks over -1 dBTP (Video) or more gain than allowed reject a try outright |
 
 The search is a small evolution strategy: it tries variations around the best so far, searches wider while it
-keeps improving and narrower when it doesn't. Typical run: 200 tries with the approximate model (about 2–3
-minutes), 300 with the real plugins. The result is then loaded and confirmed in a normal round through
+keeps improving and narrower when it doesn't. It uses all your CPU cores but one (`--jobs` to
+change): each step of the search tries one variation per core at the same time. Typical run: 200 tries with the
+approximate model, well under a minute on an 8-core CPU (about 2 minutes on one core); 300 with the real plugins,
+a few minutes. Press **Ctrl+C** to stop early: the best result so far is kept. A final step fine-tunes the
+loudness directly. The result is then loaded and confirmed in a normal round through
 EasyEffects. RNNoise and the Deep noise remover can't run offline, so they're judged in that round.
 
 ### A/B picks (step 3)
@@ -447,12 +484,12 @@ A/B picks. Common paths: `limiter`, `gate.thr`, `gate.release`, `gate.ratio`, `f
 | `--mode {1,2}` | menu | 1 = new preset, 2 = existing preset |
 | `--preset NAME\|PATH` | | (mode 2) preset to tune |
 | `--name NAME` | asked | (mode 1) name for the new preset |
-| `--profile {stream,record}` | asked | what the preset is for |
 | `--modules LIST` | checklist | e.g. `gate+expander,deep,eq,taps,comp,deess,limiter,stereo,meter` (noise: `gate`, `expander` or `gate+expander`; also `rnnoise`, `exciter`) |
 | `--replay` / `--live` | asked | how rounds are tested |
 | `--resume` | | continue the last session |
-| `--target-lufs N` | profile | speech loudness target (Stream -18, Record -24) |
-| `--max-gain N` | 12 | most gain (dB) voice2ee may add to your voice |
+| `--profile {stream,video,record}` | asked | what the preset is for |
+| `--target-lufs N` | profile | speech loudness target (Stream -18, Video -16, Record -24) |
+| `--max-gain N` | profile | most gain (dB) voice2ee may add to your voice (Stream/Record 12, Video 16) |
 | `--bands N` | 10 | EQ bands including the high-pass (6–22) |
 | `--deess N` | 1.0 | initial de-esser strength (0.3 = light, 2 = strong) |
 | `--device NAME` | picked | raw mic source |
@@ -466,13 +503,17 @@ A/B picks. Common paths: `limiter`, `gate.thr`, `gate.release`, `gate.ratio`, `f
 | `--engine {quick,optimise}` | asked | (mode 1) how the first preset is fitted |
 | `--goal NAME` | asked | Optimise goal: `balanced`, `keyboard`, `natural`, `broadcast`, `clarity` |
 | `--trials N` | 300 / 200 | Optimise tries (real plugins / approximate model) |
+| `--jobs N` | cores − 1 (max 8) | CPU cores Optimise may use |
 | `--finetune {keys,ab,both}` | asked | feedback keys, A/B picks first, or both |
 | `--no-taste` | | don't start from your saved taste |
 | `--no-quality` | | don't use the quality model even if installed |
 | `--check-full` | | show which Full-version parts are installed and work |
 
+Speech recording: `--speech-test {hybrid,read,free}` (default `hybrid`), `--free-secs` (35), `--read-secs` (12),
+`--speech-secs` (20, read only).
+
 Fine-tuning options: `--box-cut`, `--makeup`, `--gate-offset`, `--no-vad`, `--vad-thres`, `--noise-secs`,
-`--speech-secs`, `--click-secs`, `--base`. See `voice2ee --help`.
+`--click-secs`, `--base`. See `voice2ee --help`.
 
 ## Files and locations
 

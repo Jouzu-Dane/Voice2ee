@@ -109,6 +109,21 @@ def timing(speech, gate_db, noise_floor):
         below = np.nonzero(seg <= stop)[0]
         if len(below):
             tails.append(below[0] * 5.0)
+    # thinking pauses (> 1 s): how loud the background is in them, and how loud the first word after one is,
+    # both relative to your typical syllable peaks
+    ref = float(np.median(env[peaks])) if len(peaks) else float(np.percentile(env[voiced], 90))
+    pause_lv, restart = [], []
+    for (s0, ln), nxt in zip(runs, runs[1:]):
+        gap_start, gap_end = s0 + ln, nxt[0]
+        if gap_end - gap_start >= 200:
+            seg = env[gap_start + 40: gap_end - 10]               # skip the word tail and the next onset
+            if len(seg) > 20:
+                pause_lv.append(float(np.median(seg)) - ref)
+            restart.append(float(env[gap_end: gap_end + 60].max()) - ref)
+    if pause_lv:
+        out["long_pauses"] = len(pause_lv)
+        out["pause_db"] = float(np.median(pause_lv))
+        out["restart_db"] = float(np.median(restart))
     if len(tails) >= 5:
         out["decay_ms"] = float(np.median(tails))
         out["decay_long_ms"] = float(np.percentile(tails, 80))
@@ -234,7 +249,8 @@ def analyze(noise, speech, clicks=None, taps=None):
         vpk=vpk, pk5=float(np.percentile(vpk, 5)), pk98=float(np.percentile(vpk, 98)),
         pkp10=float(np.percentile(vpk, 10)), pkp50=float(np.median(vpk)), pkp95=float(np.percentile(vpk, 95)),
         lv10=lv10, pk10=pk10, voiced50=voiced.astype(float),
-        lufs=loudness.integrated(speech_st),
+        lufs=loudness.integrated(speech_st), lra=loudness.loudness_range(speech_st),
+        true_peak=loudness.true_peak(speech_st),
         lufs_st_max=float(st.max()) if len(st) else -70.0,
         imbalance=channel_imbalance(speech_st), loud_ch=_loud_channel(speech_st),
         low_voice_hi=low_voice_hi, low_noise=low_noise, tap_low_hi=tap_low_hi, tap_n=tap_n, tap_ms=tap_ms,

@@ -46,7 +46,7 @@ def rd(name):
 def args(**kw):
     d = dict(box_cut=0, deess=1.0, makeup=0, gate_offset=0, no_vad=False, vad_thres=70, bands=10, base=None,
              no_click_test=False, noise_secs=4, speech_secs=20, click_secs=6, modules=None, preset=None,
-             max_gain=12.0, target_lufs=-18.0, no_tap_test=False, tap_secs=5)
+             max_gain=None, target_lufs=-18.0, no_tap_test=False, tap_secs=5)
     d.update(kw)
     a = types.SimpleNamespace(**d)
     a.mods = finalize_mods(d.get("mods_dict") or {"noise": "gate", "rnnoise": True, "eq": True, "comp": True,

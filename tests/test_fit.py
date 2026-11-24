@@ -371,3 +371,23 @@ def test_installer_editions():
     assert "removed the Full version's extras" in r.stdout and not (pre / "share/voice2ee/venv").exists()
     help_txt = subprocess.run(["bash", str(HERE.parent / "install.sh"), "--help"], capture_output=True, text=True).stdout
     assert "--minimal" in help_txt and "--full" in help_txt
+
+
+def test_installer_asks_for_full_packages_on_arch():
+    """CachyOS: the Full packages (python-lilv, not lilv) are listed with what they're for, installed in one go,
+    and anything still missing afterwards is reported with the exact command - no false 'all good'."""
+    f = Path(tempfile.mkdtemp())
+    (f / "os-release").write_text('ID=cachyos\nID_LIKE=arch\nPRETTY_NAME="CachyOS"\n')
+    (f / "sudo").write_text('#!/bin/sh\necho "FAKE-SUDO: $*"\n')
+    (f / "sudo").chmod(0o755)
+    env = dict(os.environ, PREFIX=tempfile.mkdtemp(), VOICE2EE_OS_RELEASE=str(f / "os-release"),
+               PATH=f"{f}:{os.environ['PATH']}")
+    r = subprocess.run(["bash", str(HERE.parent / "install.sh"), "--full", "--yes"], capture_output=True, text=True,
+                       env=env, timeout=300)
+    out = r.stdout
+    assert "These packages are missing:" in out
+    assert "python-lilv" in out and "lilv python bindings: exact offline plugins (Full)" in out
+    sudo = next(l for l in out.splitlines() if l.startswith("FAKE-SUDO:"))
+    assert " python-lilv " in sudo + " " and " lilv " not in sudo + " "
+    assert "Still missing:" in out and "sudo pacman -S --needed python-lilv" in out
+    assert "some parts missing" in out and "all parts working" not in out

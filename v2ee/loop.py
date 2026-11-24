@@ -21,6 +21,16 @@ Recording tips (record profile):
   * This preset keeps headroom (peaks under -6 dBFS, safety limiter at -1) and natural dynamics on purpose."""
 
 
+VIDEO_TIPS = """
+Recording tips (video profile - ready to publish):
+  * OBS: Settings > Output > Recording: MKV (remux to MP4 afterwards) or MP4, audio AAC 320 kbps - or PCM if you
+    still want lossless. The voice is already at about -16 LUFS with true peaks under -1 dBTP.
+  * Strongly recommended: your RAW mic as a second audio track (Advanced Audio Properties > Tracks). The
+    processing is baked into track 1; track 2 lets you redo a take's sound if something ever goes wrong.
+  * Game audio / music: keep it about 10-15 dB under your voice in OBS (its level isn't part of this preset).
+  * Still worth doing in the edit: cut mistakes and long pauses. The voice itself needs no further processing."""
+
+
 def _snapshot(P):
     return json.dumps({k: v for k, v in P.items() if not k.startswith("last_")}, sort_keys=True, default=str)
 
@@ -77,6 +87,17 @@ def report(P, a):
     print(f"\nloudness {a['lufs']:.1f} LUFS (target {tgt:.0f}) | speech peaks {a['pkp10']:.0f}..{a['pkp95']:.0f} dBFS, "
           f"max {a['peak_db']:.1f} (peaks aim under {prof(P, 'peak_hi'):.0f}, limiter {P['limiter']:.0f}) | SNR {a['snr']:.0f} dB | sibilance {a['sib_diff']:+.1f} dB"
           f"{clickinfo}")
+    extra = []
+    if prof(P, "lra") and a.get("lra") is not None:
+        lo, hi = prof(P, "lra")
+        extra.append(f"loudness range {a['lra']:.1f} LU (aim {lo:g}-{hi:g})")
+    if prof(P, "true_peak") is not None and a.get("true_peak") is not None:
+        extra.append(f"true peak {a['true_peak']:.1f} dBTP (limit {prof(P, 'true_peak'):g})")
+    if a.get("long_pauses"):
+        extra.append(f"thinking pauses ({a['long_pauses']}): background {a['pause_db']:+.0f} dB vs your speech, "
+                     f"first word after a pause {a['restart_db']:+.1f} dB vs typical")
+    if extra:
+        print(" | ".join(extra))
     if a.get("applied_gain") is not None:
         warn = "  <-- too much!" if a["applied_gain"] > P.get("max_gain", 12.0) + SAFETY_MARGIN else ""
         print(f"EasyEffects adds {a['applied_gain']:+.1f} dB to your voice on average "
@@ -211,6 +232,8 @@ def finish(P, sess, base, base_file=None, raw=None, test_mode="live"):
     print(f"\nSaved and loaded: {name}  ({path})")
     if P.get("profile") == "record":
         print(RECORD_TIPS)
+    elif P.get("profile") == "video":
+        print(VIDEO_TIPS)
     if sess.kept:
         print("Runs you kept: " + ", ".join(sess.kept))
     save_state(P, Session(sess.out, sess.stem, ver, name), base_file, raw, test_mode)  # --resume continues here

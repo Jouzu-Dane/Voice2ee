@@ -55,7 +55,8 @@ def derive_timing(a, pname="stream"):
       the tail cuts echo, longer keeps it natural (record)
     - pauses between words: a gate must be able to close inside one
     - knock length: how long the tap catcher holds"""
-    rec = pname == "record"
+    style = PROFILES[pname]["timing"]
+    rec = style == "natural"
     rate = a.get("syl_rate") or 5.0
     T = 1000.0 / rate                                  # ms per syllable
     fast = a.get("rise_fast_ms") or 15.0
@@ -71,6 +72,8 @@ def derive_timing(a, pname="stream"):
     t["open"] = round(clip(0.3 * fast, 1.5, 8), 1)        # gate/expander attack
     if rec:
         t["gate_rel"] = round(clip(1.2 * decay, 80, 300))
+    elif style == "smooth":                            # videos: close after the word tail, never mid-word
+        t["gate_rel"] = round(clip(1.0 * decay, 60, max(80, min(250, 0.9 * gap))))
     else:
         t["gate_rel"] = round(clip(0.8 * decay, 50, max(60, min(250, 0.8 * gap))))
     t["exp_rel"] = round(clip(0.9 * t["gate_rel"], 40, 300))
@@ -99,7 +102,7 @@ def plan_exciter(a, pname="stream"):
         scope, harm, why = clip(lo * 0.8, 3000, 4500), 3.0, "low - your voice is dull up top"
     else:
         scope, harm, why = clip(lo, 4000, 6500), 2.5, "where your 's' band starts"
-    cap = 16000.0 if pname == "record" else 14000.0
+    cap = PROFILES[pname]["exciter_ceil"]
     hiss = a.get("hf_snr", 40.0) < 12.0
     ceil = clip(11000.0 if hiss else cap, scope + 2000, cap)
     ex = {"amount": 2.0 if dull and not bright else 1.0, "harmonics": harm, "scope": round(scope),
@@ -158,6 +161,7 @@ def initial_params(a, tw):
     pr = PROFILES[pname]
     target = float(tw.target_lufs) if getattr(tw, "target_lufs", None) is not None else pr["target_lufs"]
     notes = [f"Profile: {pname} - {pr['label']}"]
+    cap = float(tw.max_gain) if getattr(tw, "max_gain", None) is not None else pr["max_gain"]
     tm = derive_timing(a, pname)
     if tm["measured"]:
         notes.append(f"Your timing: ~{1000 / tm['T']:.1f} syllables/s, word tails ~{tm['decay']:.0f} ms, pauses "
@@ -219,8 +223,7 @@ def initial_params(a, tw):
         g = -fac * (r - bd["b"]) - w * tw.box_cut
         if f >= 8000 and a["snr"] < 40:
             g = min(g, 0.0)
-        if pname == "record":
-            g *= 0.7                                  # corrective, not a sound: leave the rest for the edit
+        g *= pr["eq_strength"]                        # record: corrective only, the rest is left for the edit
         bd["g"] = clip(g, *glim(f))
     # high-pass: frequency from your pitch; slope from how much rumble and how many pops there are
     rumble = a.get("rumble_db", -60.0) > -32.0
@@ -236,7 +239,7 @@ def initial_params(a, tw):
                      + ", ".join(f"{x['f']:.0f} Hz {x['g']:+.1f} dB" for x in big))
 
     # dynamics
-    c1, c2, info = plan_dynamics(a, tw.makeup, tw.max_gain, target, lo=pr["peak_lo"], hi=pr["peak_hi"],
+    c1, c2, info = plan_dynamics(a, tw.makeup, cap, target, lo=pr["peak_lo"], hi=pr["peak_hi"],
                                  use_c2=mods["comp2"], lev_ratio=pr["leveler_ratio"], tm=tm)
     if mods["comp"]:
         notes.append(f"Leveler {c1['ratio']:g}:1 @ {c1['thr']:.1f} dB, {c1['attack']:g}/{c1['release']:g} ms" +
@@ -246,10 +249,10 @@ def initial_params(a, tw):
         notes.append(f"Loudness: your raw speech is {a['lufs']:.1f} LUFS; this preset starts around "
                      f"{info['est_lufs']:.1f} LUFS ({info['net_gain']:+.1f} dB, {START_HEADROOM:g} dB short on purpose); "
                      f"target {target:.0f} LUFS, peaks under {pr['peak_hi']:.0f} dBFS, never more than "
-                     f"+{tw.max_gain:.0f} dB")
-        if info["wanted_net"] > tw.max_gain + 0.5:
+                     f"+{cap:.0f} dB")
+        if info["wanted_net"] > cap + 0.5:
             notes.append(f"Reaching {target:.0f} LUFS would need about {info['wanted_net']:+.0f} dB on your voice. "
-                         f"Raise the mic's own gain by ~{info['wanted_net'] - tw.max_gain:.0f} dB (or move closer) "
+                         f"Raise the mic's own gain by ~{info['wanted_net'] - cap:.0f} dB (or move closer) "
                          "rather than allowing more here.")
     net = info["net_gain"] if mods["comp"] else 0.0
 
@@ -258,7 +261,7 @@ def initial_params(a, tw):
     sd_ = a["sib_diff"]
     pres_g = max([x["g"] for x in bands if 2200 <= x["f"] <= 4500] or [0.0]) if mods["eq"] else 0.0
     gain_pre = net + pres_g * 0.5
-    strength = tw.deess * (0.75 if pname == "record" else 1.0)
+    strength = tw.deess * pr["deess_strength"]
     d_ratio = 1 + ((3.0 if sd_ > 4 else 2.0 if sd_ > 1.5 else 1.5) - 1) * strength
     de_thr = clip(float(np.percentile(a["sib_lv"], 90)) + gain_pre, DEESS_FLOOR, -3)
     snake = a.get("sib_peaky", 0.0) > 6.0
@@ -309,7 +312,7 @@ def initial_params(a, tw):
         "exciter": ex, "limiter": pr["limiter"],
         "lim_t": {"lookahead": tm["lim_look"], "attack": tm["lim_look"], "release": float(tm["lim_rel"])},
         "timing": {k: v for k, v in tm.items() if k != "measured"},
-        "bias": {"sib": 0.0, "level": 0.0}, "max_gain": float(tw.max_gain), "target_lufs": target,
+        "bias": {"sib": 0.0, "level": 0.0}, "max_gain": cap, "target_lufs": target,
     }
     if mods["limiter"]:
         notes.append(f"Limiter {pr['limiter']:g} dBFS, lookahead/attack {tm['lim_look']:g} ms (your fastest onsets), "

@@ -79,7 +79,7 @@ def taste_tone_shift(centers, taste):
 def scorecard(proc, P, goal="balanced", quality=None, taste=None):
     """proc: processed take (noise/speech/clicks/taps + raw_speech). Returns (total, parts, analysis)."""
     pname = P.get("profile", "stream")
-    rec = pname == "record"
+    pr = PROFILES[pname]
     w = GOALS.get(goal, GOALS["balanced"])["w"]
     a = analyze(proc["noise"], proc["speech"], proc.get("clicks"), proc.get("taps"))
     parts, why = {}, []
@@ -99,7 +99,7 @@ def scorecard(proc, P, goal="balanced", quality=None, taste=None):
     parts["loud"] = max(0.0, abs(a["lufs"] - tgt) - 0.5 * tol)
     if a.get("click_hi30") is not None:
         leak = a["click_hi30"] - a["speech_lo30"]
-        parts["clicks"] = max(0.0, leak - (-10.0 if rec else -20.0)) / 3
+        parts["clicks"] = max(0.0, leak - pr["click_target"]) / 3
     if a.get("tap_low_hi") is not None and a.get("low_voice_hi") is not None:
         parts["knocks"] = max(0.0, a["tap_low_hi"] - a["low_voice_hi"] - 2.0) / 3
     if proc.get("raw_speech") is not None:
@@ -110,7 +110,14 @@ def scorecard(proc, P, goal="balanced", quality=None, taste=None):
     resid = a["diff"] - taste_tone_shift(a["centers"], taste)
     parts["tone"] = float(np.sqrt(np.mean(resid[band] ** 2))) / 2
     parts["sib"] = max(0.0, a["sib_diff"] - 1.0) / 2
-    parts["noise"] = max(0.0, (35.0 if rec else 45.0) - a["snr"]) / 5
+    parts["noise"] = max(0.0, pr["snr_target"] - a["snr"]) / 5
+    if a.get("pause_db") is not None:                          # thinking pauses should be quiet
+        parts["pauses"] = max(0.0, a["pause_db"] + (pr["snr_target"] - 5.0)) / 5
+    if pr["lra"] and a.get("lra") is not None:                 # video: even enough, not squashed
+        lo, hi = pr["lra"]
+        parts["lra"] = max(0.0, a["lra"] - hi, lo - a["lra"]) / 2
+    if pr["true_peak"] is not None and a["true_peak"] > pr["true_peak"] + 0.3:
+        why.append(f"true peak {a['true_peak']:.1f} dBTP over {pr['true_peak']:.0f}")
     if quality is not None:
         q = quality.score(proc["speech"])
         a["dnsmos"] = q
@@ -126,6 +133,8 @@ def summary(a):
     bits = [f"{a['lufs']:.1f} LUFS", f"peaks {a['peak_db']:.1f}"]
     if a.get("click_hi30") is not None:
         bits.append(f"clicks {a['click_hi30'] - a['speech_lo30']:+.0f} dB")
+    elif "click_hi30" in a:
+        bits.append("clicks gone")
     if a.get("estoi") is not None:
         bits.append(f"words kept {a['estoi']:.2f}")
     if a.get("dnsmos"):

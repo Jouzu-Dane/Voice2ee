@@ -42,16 +42,32 @@ def choose_profile(args):
         return args.profile
     print("""
 What is this preset for?
-  1) Stream  - streaming / voice chat: sounds finished live (loudness -18 LUFS, peaks under -6 dBFS,
-               firm noise and click control)
-  2) Record  - recording video in a lossless format (e.g. PCM 32-bit float) and editing later: natural
-               dynamics, headroom (peaks under -6 dBFS, about -24 LUFS), gentle cleanup, no hard gate
+
+  1) Stream  - Twitch, Discord, voice chat. Sounds finished the moment it leaves your PC.
+               -18 LUFS, peaks under -6 dBFS (OBS-friendly). Firm noise and click control: silence is
+               silent. Strongest compression, fastest gate.
+               Pick it when: you go live, or talk to people in real time.
+
+  2) Video   - videos that should need (almost) no audio editing. Finished sound straight out of OBS.
+               -16 LUFS (spoken YouTube level), true peaks under -1 dBTP, loudness range 5-8 LU (even,
+               not squashed). Clean background without audible gating. Full EQ and de-essing.
+               Pick it when: you record and only want to cut mistakes - no audio work in the editor.
+               Keep your raw mic on a second OBS track: the processing is baked in.
+
+  3) Record  - videos you'll finish in an editor (DaVinci Resolve etc.), recorded losslessly.
+               About -24 LUFS with headroom, natural dynamics, gentle cleanup, no hard gate. Only fixes
+               what's hard to fix later (rumble, boxiness, harsh "s", knocks).
+               Pick it when: you like to polish the sound yourself, or mix voice with music/effects.
+
+  Quick rule: live -> 1.  Upload as recorded -> 2.  Edit the audio afterwards -> 3.
 """)
     while True:
-        s = ask("Choose [1/2]: ")
+        s = ask("Choose [1/2/3]: ")
         if s in ("", "1"):
             return "stream"
         if s == "2":
+            return "video"
+        if s == "3":
             return "record"
 
 
@@ -61,12 +77,9 @@ REMOVER_CYCLE = [("deep", False, True), ("rnnoise", True, False), ("both", True,
 
 
 def default_modules(profile):
-    """The best default chain for a profile, adjusted to what's installed (DeepFilterNet)."""
-    m = dict(DEFAULT_MODULES[profile])
-    deep = ee.deep_available()
-    if deep is True:                         # best click/tap removal available: use it instead of RNNoise
-        m["deep"], m["rnnoise"] = True, False
-    return m, deep
+    """The best default chain for a profile. RNNoise is the default remover; the Deep noise remover
+    (DeepFilterNet) can be picked in the checklist (item 2)."""
+    return dict(DEFAULT_MODULES[profile]), ee.deep_available()
 
 
 def choose_modules(args, profile="stream"):
@@ -87,11 +100,14 @@ def choose_modules(args, profile="stream"):
     deep_note = {True: "installed", False: "NOT installed - see README", "flatpak": "Flatpak: usually bundled"}[deep]
     items = [("eq", "Equalizer (+ steep high-pass for pops)"),
              ("taps", "Desk-tap catcher (compresses only the thump band below ~150 Hz)"),
-             ("comp", "Compressors (" + ("leveler + fast peak catcher" if profile == "stream" else
-                                         "gentle leveler only - recordings keep their dynamics") + ")"),
+             ("comp", "Compressors (" + {"stream": "leveler + fast peak catcher",
+                                         "video": "leveler + gentle peak catcher, aiming for an even loudness range",
+                                         "record": "gentle leveler only - recordings keep their dynamics"}[profile]
+              + ")"),
              ("deess", "De-essers (wide + narrow 'snake S'; both always enabled)"),
              ("exciter", "Exciter (adds air/brightness - can emphasise sibilance and clicks)"),
-             ("limiter", "Limiter (" + ("-6 dBFS ceiling" if profile == "stream" else "-1 dBFS safety only") + ")"),
+             ("limiter", "Limiter (" + {"stream": "-6 dBFS ceiling", "video": "true peaks under -1 dBTP",
+                                        "record": "-1 dBFS safety only"}[profile] + ")"),
              ("stereo", "Automatic mono fix (Stereo Tools, only added if your mic reaches one channel only)"),
              ("meter", "Level meter at the end (watch loudness live in EasyEffects)")]
     while True:
@@ -241,11 +257,16 @@ def main():
     tm.add_argument("--replay", action="store_true", help="record once, replay it through EasyEffects every round")
     tm.add_argument("--live", action="store_true", help="talk live every round")
     ap.add_argument("--reuse", action="store_true", help="(mode 1) reuse the last raw recording instead of recording")
-    ap.add_argument("--profile", choices=["stream", "record"], help="what the preset is for (asked if not given)")
+    ap.add_argument("--profile", choices=["stream", "video", "record"],
+                    help="what the preset is for: stream (live), video (ready to publish), record (edited later)")
     ap.add_argument("--target-lufs", type=float, default=None,
-                    help="speech loudness target in LUFS (default: stream -18, record -24)")
+                    help="speech loudness target in LUFS (default: stream -18, video -16, record -24)")
     ap.add_argument("--noise-secs", type=float, default=4)
-    ap.add_argument("--speech-secs", type=float, default=20)
+    ap.add_argument("--speech-test", choices=["hybrid", "read", "free"], default="hybrid",
+                    help="speech recording: free talk + test sentences (default), read a passage, or free talk only")
+    ap.add_argument("--free-secs", type=float, default=35, help="free-talk part of the speech recording (s)")
+    ap.add_argument("--read-secs", type=float, default=12, help="test-sentence part of the hybrid recording (s)")
+    ap.add_argument("--speech-secs", type=float, default=20, help="length of the read-only recording (s)")
     ap.add_argument("--click-secs", type=float, default=6)
     ap.add_argument("--bands", type=int, default=10, help=f"total EQ bands incl. high-pass, 6-{MAX_BANDS} (default 10)")
     ap.add_argument("--no-click-test", action="store_true")
@@ -254,7 +275,8 @@ def main():
     ap.add_argument("--box-cut", type=float, default=0.0)
     ap.add_argument("--deess", type=float, default=1.0, help="initial de-esser strength: 0.3=light, 1=default, 2=strong")
     ap.add_argument("--makeup", type=float, default=0.0)
-    ap.add_argument("--max-gain", type=float, default=12.0, help="most gain (dB) the tool may add to your voice (default 12)")
+    ap.add_argument("--max-gain", type=float, default=None,
+                    help="most gain (dB) the tool may add to your voice (default: stream/record 12, video 16)")
     ap.add_argument("--gate-offset", type=float, default=0.0)
     ap.add_argument("--no-vad", action="store_true")
     ap.add_argument("--vad-thres", type=float, default=70.0)
@@ -265,6 +287,7 @@ def main():
                    "recording (asked if not given)")
     g.add_argument("--goal", choices=list(fit.score.GOALS), help="what the optimiser prioritises (asked if not given)")
     g.add_argument("--trials", type=int, help="optimiser tries (default 300 exact / 200 approximate)")
+    g.add_argument("--jobs", type=int, help="CPU cores the optimiser may use (default: all but one, max 8)")
     g.add_argument("--finetune", choices=["keys", "ab", "both"], help="feedback keys, A/B picks, or both (asked)")
     g.add_argument("--no-taste", action="store_true", help="don't start from your saved A/B taste")
     g.add_argument("--no-quality", action="store_true", help="don't use the quality model even if installed")
@@ -315,7 +338,8 @@ def main():
             sys.exit("Saved state is from an older version of this script - start a new session from the menu.")
         P, sess, bf = st["P"], Session.from_dict(st["sess"]), st.get("base_file")
         base = json.loads(Path(bf).read_text()) if bf else None
-        P["max_gain"] = max(args.max_gain, P["comp"]["makeup"] if P["modules"]["comp"] else 0.0)
+        cap = args.max_gain if args.max_gain is not None else P.get("max_gain", 12.0)
+        P["max_gain"] = max(cap, P["comp"]["makeup"] if P["modules"]["comp"] else 0.0)
         print(f"Resuming with '{sess.current}'.")
         mode = "live" if args.live else ("replay" if (args.replay or st.get("test_mode") == "replay") else "live")
         raw = choose_raw(st.get("raw")) if (mode == "live" and st.get("raw")) else None
@@ -435,7 +459,8 @@ def _exact_status(args):
 
 def import_preset_with_args(base, args, profile="stream"):
     P, notes = ee.import_preset(base)
-    P["max_gain"] = max(args.max_gain, P["comp"]["makeup"] if P["modules"]["comp"] else 0.0)
+    cap = args.max_gain if args.max_gain is not None else PROFILES[profile]["max_gain"]
+    P["max_gain"] = max(cap, P["comp"]["makeup"] if P["modules"]["comp"] else 0.0)
     P["profile"] = profile
     P["modules"]["profile"] = profile
     P["target_lufs"] = float(args.target_lufs) if args.target_lufs is not None else PROFILES[profile]["target_lufs"]

@@ -158,8 +158,12 @@ def constrained_space(P, ov=None):
 
 
 # ------------------------------------------------------------------------------------------- optimiser
-def optimise(P0, evaluate, trials=200, seed=0, progress=None, ov=None):
-    """evaluate(P) -> (score, parts, analysis). Returns (best_P, best_score, best_analysis, n_tried)."""
+def optimise(P0, evaluate, trials=200, seed=0, progress=None, ov=None, batch=None, info=None):
+    """evaluate(P) -> (score, parts, analysis). batch(list_of_P) -> list of those, e.g. on several CPU cores
+    (each generation's tries are independent). Ctrl+C stops early and keeps the best so far (info['stopped']).
+    Returns (best_P, best_score, best_analysis, n_tried)."""
+    info = info if info is not None else {}
+    run_batch = batch or (lambda Ps: [evaluate(p) for p in Ps])
     rng = np.random.default_rng(seed)
     base = copy.deepcopy(P0)
     dims = constrained_space(base, ov)
@@ -177,22 +181,24 @@ def optimise(P0, evaluate, trials=200, seed=0, progress=None, ov=None):
     u0 = np.array([(get(base, p) - l) / max(h - l, 1e-9) for p, l, h in dims]) if dims else np.zeros(0)
     u0 = np.clip(u0, 0, 1)
     best_u = u0
-    s0, parts0, a0 = evaluate(make(u0))
+    s0, parts0, a0 = run_batch([make(u0)])[0]
     best = (s0, a0)
-    tried, sigma, lam = 1, 0.18, 6
+    tried, sigma = 1, 0.18
+    lam = max(6, int(info.get("workers", 1)))          # one generation = one try per CPU core (at least 6)
     if progress:
         progress(tried, trials, s0, s0, a0)
     if not dims:
         return make(u0), s0, a0, tried
     mean = u0.copy()
     while tried < trials:
-        gen = []
-        for _ in range(min(lam, trials - tried)):
-            u = np.clip(mean + sigma * rng.standard_normal(len(dims)), 0, 1)
-            s, _, a = evaluate(make(u))
-            tried += 1
-            gen.append((s, u, a))
-        gen.sort(key=lambda t: t[0])
+        us = [np.clip(mean + sigma * rng.standard_normal(len(dims)), 0, 1) for _ in range(min(lam, trials - tried))]
+        try:
+            res = run_batch([make(u) for u in us])
+        except KeyboardInterrupt:
+            info["stopped"] = True
+            break
+        tried += len(us)
+        gen = sorted(((s, u, a) for (s, _, a), u in zip(res, us)), key=lambda t: t[0])
         if gen[0][0] < best[0]:
             best, best_u = (gen[0][0], gen[0][2]), gen[0][1]
             sigma = min(0.35, sigma * 1.15)

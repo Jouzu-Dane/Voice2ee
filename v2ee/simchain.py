@@ -4,14 +4,32 @@ the tests. The Full version uses the real plugins instead (offline.py).
 Not bit-exact: gate, expander, EQ (RBJ biquads), RMS compressors, split-band de-esser, crude exciter and a
 lookahead limiter - including the limiter's 'Threshold Boost' (gain-boost), which EasyEffects defaults to ON.
 RNNoise is not simulated (passes through)."""
+from functools import lru_cache
+
 import numpy as np
 from scipy import signal
 SR = 48000
+
+
+@lru_cache(maxsize=256)
+def _butter(order, freq, kind):
+    f = tuple(freq) if isinstance(freq, (list, tuple)) else float(freq)
+    return signal.butter(order, f, kind, fs=SR, output="sos")
+
+
+def _movavg(p, n):
+    """Same as np.convolve(p, ones(n)/n, 'same') (zero-padded edges), in O(len) via a running sum."""
+    N = len(p)
+    c = np.concatenate([[0.0], np.cumsum(p, dtype=np.float64)])
+    i = np.arange(N)
+    lo = np.clip(i - n // 2, 0, N)
+    hi = np.clip(i + (n - 1) // 2 + 1, 0, N)
+    return (c[hi] - c[lo]) / n
 BLK = 48  # 1 ms control rate
 
 def dbv(x): return 20*np.log10(np.maximum(x, 1e-9))
 def env_rms_db(x, ms):
-    n = max(1, int(ms*SR/1000)); p = np.convolve(x**2, np.ones(n)/n, "same")
+    n = max(1, int(ms*SR/1000)); p = _movavg(np.asarray(x, np.float64)**2, n)
     return 10*np.log10(np.maximum(p, 1e-18))
 def blocks(v): m = len(v)//BLK; return v[:m*BLK].reshape(m, BLK).mean(1)
 def smooth_db(target, att_ms, rel_ms, rising_is_attack=False):
@@ -35,7 +53,7 @@ def detector(x, p):
         mode = str(p.get(f"{key}-mode", "Off"))
         if mode.lower() != "off":
             order = {"12": 2, "24": 4, "36": 6}.get(mode.split()[0], 2)
-            d = signal.sosfilt(signal.butter(order, p.get(f"{key}-frequency", 1000.0), kind, fs=SR, output="sos"), d)
+            d = signal.sosfilt(_butter(order, float(p.get(f"{key}-frequency", 1000.0)), kind), d)
     return d
 
 def gate(x, p):
@@ -82,9 +100,9 @@ def equalizer(x, p):
         t = b.get("type", "Off")
         if t == "Hi-pass":
             order = {"x1": 1, "x2": 2, "x3": 3, "x4": 4}.get(b.get("slope", "x1"), 1)
-            y = signal.sosfilt(signal.butter(order, b["frequency"], "high", fs=SR, output="sos"), y)
+            y = signal.sosfilt(_butter(order, float(b["frequency"]), "high"), y)
         elif t == "Lo-pass":
-            y = signal.sosfilt(signal.butter(2, b["frequency"], "low", fs=SR, output="sos"), y)
+            y = signal.sosfilt(_butter(2, float(b["frequency"]), "low"), y)
         else:
             c = rbj(t, b["frequency"], b.get("gain", 0), b.get("q", 0.7))
             if c: y = signal.lfilter(c[0], c[1], y)
@@ -102,7 +120,7 @@ def compressor(x, p):
     if la > 0:
         d = np.concatenate([d[la:], np.zeros(la)])                # lookahead: react before the peak arrives
     env = env_peak_db(d, max(1.0, sc.get("reactivity", 10) / 4)) if sc.get("mode") == "Peak" else env_rms_db(d, sc.get("reactivity", 10))
-    L = np.array([e.max() for e in env[: len(env) // BLK * BLK].reshape(-1, BLK)]) if sc.get("mode") == "Peak" else blocks(env)
+    L = env[: len(env) // BLK * BLK].reshape(-1, BLK).max(axis=1) if sc.get("mode") == "Peak" else blocks(env)
     thr, r = p.get("threshold", -20), p.get("ratio", 2); kw = abs(p.get("knee", -6))
     over = L - thr
     gr = np.where(over <= -kw/2, 0.0, np.where(over >= kw/2, over*(1-1/r), (1-1/r)*(over+kw/2)**2/(2*kw)))
@@ -115,7 +133,7 @@ def compressor(x, p):
 
 def deesser(x, p):
     f1 = p.get("f1-freq", 6000)
-    sos = signal.butter(2, f1*0.8, "high", fs=SR, output="sos")
+    sos = _butter(2, float(f1*0.8), "high")
     hf = signal.sosfilt(sos, x); lf = x - hf
     L = blocks(env_rms_db(hf, 5))
     over = L - p.get("threshold", -20)
@@ -124,10 +142,10 @@ def deesser(x, p):
     return lf + apply_gain_db(hf, g + p.get("makeup", 0))
 
 def exciter(x, p):
-    hp = signal.sosfilt(signal.butter(2, p.get("scope", 4000), "high", fs=SR, output="sos"), x)
+    hp = signal.sosfilt(_butter(2, float(p.get("scope", 4000)), "high"), x)
     h = np.tanh(hp*10**(p.get("harmonics", 2)/6))/10**(p.get("harmonics", 2)/6) - hp
     if p.get("ceil-active", True):
-        h = signal.sosfilt(signal.butter(2, min(p.get("ceil", 16000), SR/2-100), "low", fs=SR, output="sos"), h)
+        h = signal.sosfilt(_butter(2, float(min(p.get("ceil", 16000), SR/2-100)), "low"), h)
     return x + h*10**(p.get("amount", 0)/20)*4
 
 def limiter(x, p):
@@ -152,8 +170,8 @@ def multiband_compressor(x, p):
               if p.get(f"band{i}", {}).get("enable-band")]
     bands, rest = [], x
     for f in splits:
-        sl = signal.butter(2, f, "low", fs=SR, output="sos")
-        sh = signal.butter(2, f, "high", fs=SR, output="sos")
+        sl = _butter(2, float(f), "low")
+        sh = _butter(2, float(f), "high")
         bands.append(signal.sosfilt(sl, signal.sosfilt(sl, rest)))   # Linkwitz-Riley 4: LP + HP sum flat
         rest = signal.sosfilt(sh, signal.sosfilt(sh, rest))
     bands.append(rest)
@@ -167,7 +185,7 @@ def multiband_compressor(x, p):
             d = np.concatenate([b[la:], np.zeros(la)]) if la > 0 else b
             if bp.get("sidechain-mode") == "Peak":
                 env = dbv(maximum_filter1d(np.abs(d), size=max(1, int(bp.get("sidechain-reactivity", 5) * SR / 4000))))
-                L = np.array([e.max() for e in env[: len(env) // BLK * BLK].reshape(-1, BLK)])
+                L = env[: len(env) // BLK * BLK].reshape(-1, BLK).max(axis=1)
             else:
                 L = blocks(env_rms_db(d, bp.get("sidechain-reactivity", 10)))
             r, thr = bp["ratio"], bp["attack-threshold"]

@@ -47,7 +47,7 @@ def test_profile_defaults():
     s, _ = _P({"profile": "stream"})
     r, _ = _P({"profile": "record"})
     assert s["modules"]["comp2"] and not r["modules"]["comp2"]          # no peak squashing for recordings
-    assert s["rnnoise"]["vad"] and not r["modules"]["rnnoise"]
+    assert s["rnnoise"]["vad"] and r["modules"]["rnnoise"] and not r["rnnoise"]["vad"]   # RNNoise default, no VAD for recordings
     assert r["limiter"] == -1.0 and s["limiter"] == -6.0
     assert r["modules"]["noise"] == "expander" and s["modules"]["noise"] == "both"
 

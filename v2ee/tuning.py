@@ -143,6 +143,29 @@ def auto_adjust(P, a):
                 msgs.append(f"loudness is {err:.0f} LU under target with the compressor already firm and peaks "
                             f"at the ceiling - use a lower --target-lufs, or accept a slightly quieter voice")
 
+    # video: even loudness over the whole take (loudness range), and true peaks safe after export
+    lra_t = prof(P, "lra")
+    if lra_t and m["comp"] and a.get("lra") is not None:
+        c1, (lo_r, hi_r) = P["comp"], lra_t
+        if a["lra"] > hi_r + 0.5 and (c1["ratio"] < 4.0 or c1["thr"] > -60):
+            old_r, old_t = c1["ratio"], c1["thr"]
+            c1["ratio"] = round(min(4.0, old_r * 1.15), 2)
+            c1["thr"] = round(old_t - 1.5, 1)
+            msgs.append(f"loudness range {a['lra']:.1f} LU (aim {lo_r:g}-{hi_r:g}) -> leveler {old_r:.1f}:1 @ {old_t:.1f}"
+                        f" -> {c1['ratio']:.1f}:1 @ {c1['thr']:.1f} dB (evener)")
+        elif a["lra"] < lo_r - 0.5 and c1["ratio"] > 1.3:
+            old_r = c1["ratio"]
+            c1["ratio"] = round(max(1.3, old_r / 1.15), 2)
+            msgs.append(f"loudness range only {a['lra']:.1f} LU (aim {lo_r:g}-{hi_r:g}) -> leveler {old_r:.1f}:1 -> "
+                        f"{c1['ratio']:.1f}:1 (less squashed)")
+    tp_max = prof(P, "true_peak")
+    if tp_max is not None and m["limiter"] and a.get("true_peak") is not None and a["true_peak"] > tp_max + 0.3:
+        old = P["limiter"]
+        P["limiter"] = round(max(-4.0, old - (a["true_peak"] - tp_max) - 0.2), 1)
+        if P["limiter"] != old:
+            msgs.append(f"true peak {a['true_peak']:.1f} dBTP (limit {tp_max:g}) -> limiter {old:g} -> "
+                        f"{P['limiter']:g} dBFS")
+
     if m["deess"]:
         d = P["deess"]
         d.setdefault("thr0", d["thr"])
@@ -173,6 +196,25 @@ def auto_adjust(P, a):
             else:
                 msgs.append(f"{' / '.join(reasons)}, but the {m['noise']} is at its safe limit (use 'w' if words get cut)")
 
+    # thinking pauses: the background in pauses longer than 1 s should be well under your speech (breaths, room
+    # and mouth noise get lifted by the makeup gain). Only when the click/SNR rule above didn't already act.
+    want = prof(P, "snr_target") - 5.0
+    if (m["noise"] and a.get("pause_db") is not None and a["pause_db"] > -want
+            and not any("threshold" in x and m["noise"] in x for x in msgs)):
+        g = P["gate"]
+        if g["thr"] + 1 <= g["max"]:
+            g["thr"] = round(g["thr"] + 1, 1)
+            msgs.append(f"thinking pauses: background only {-a['pause_db']:.0f} dB under your speech (aim {want:.0f}+) "
+                        f"-> {'expander' if m['noise'] == 'both' else m['noise']} threshold {g['thr']:.1f} dB")
+    # the first word after a long pause arrives before any compression: if it jumps out, catch it faster
+    if (m.get("comp2") and m["comp"] and a.get("restart_db") is not None and a["restart_db"] > 4.0
+            and P["comp2"]["attack"] > 0.6):
+        c2 = P["comp2"]
+        old = c2["attack"]
+        c2["attack"] = round(max(0.5, old * 0.7), 1)
+        msgs.append(f"first words after a pause jump {a['restart_db']:+.1f} dB over your typical syllables -> peak "
+                    f"compressor attack {old:g} -> {c2['attack']:g} ms")
+
     if m.get("taps") and P.get("taps") and a.get("tap_low_hi") is not None and a.get("low_voice_hi") is not None:
         t = P["taps"]
         rel = a["tap_low_hi"] - a["low_voice_hi"]          # how far knocks still stick out above your voice's bass
@@ -196,7 +238,7 @@ def auto_adjust(P, a):
     # compression/makeup is lifting the room tails ("echoey") -> close the noise stage sooner
     tmg = P.get("timing") or {}
     if (m["noise"] and tmg.get("decay") and a.get("decay_ms") is not None
-            and a["decay_ms"] > tmg["decay"] + 30 and P.get("profile", "stream") == "stream"):
+            and a["decay_ms"] > tmg["decay"] + 30 and prof(P, "echo_check")):
         g = P["gate"]
         old = g.get("release", 150.0)
         g["release"] = float(max(40, round(old * 0.8)))

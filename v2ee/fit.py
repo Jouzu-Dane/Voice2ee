@@ -2,6 +2,9 @@
 version adds. Everything heavy is optional and detected at run time."""
 import contextlib
 import copy
+import multiprocessing as mp
+import os
+import signal
 import tempfile
 import time
 from pathlib import Path
@@ -29,7 +32,8 @@ def print_full_status(st):
     print(f"  {'✔' if ok_q else '✘'} quality model (DNSMOS on onnxruntime): {why_q}")
     d = st["deep"]
     print(f"  {'✔' if d is True else '?' if d == 'flatpak' else '✘'} DeepFilterNet (Deep noise remover)")
-    if not (ok_e and ok_q):
+    import os
+    if not (ok_e and ok_q) and not os.environ.get("VOICE2EE_FROM_INSTALLER"):
         print("  Get the missing parts with:  ./install.sh --full   (see README: 'Minimal or Full')")
 
 
@@ -97,20 +101,124 @@ def preset_json(P, base=None):
         return json.loads(Path(ee.write_preset(copy.deepcopy(P), "tmp", Path(d), base)).read_text())
 
 
-def run_optimise(P, take, args, st, base=None, out=print):
-    chain = offline.LV2Chain() if st["exact"][0] else offline.ApproxChain()
-    q = quality.load() if st["quality"][0] and not getattr(args, "no_quality", False) else None
-    goal = choose_goal(args)
-    trials = int(getattr(args, "trials", None) or (300 if chain.exact else 200))
-    tst = None if getattr(args, "no_taste", False) else taste.load_taste()[0]
-    short = 10 if chain.exact else 8
+# Worker processes: each builds its own chain (and quality model) once, then scores candidates. Only small,
+# plain results travel back, so the parent stays responsive.
+_W = {}
+_KEEP = ("lufs", "peak_db", "click_hi30", "speech_lo30", "estoi", "dnsmos", "rejected", "lra", "true_peak")
 
-    def evaluate(Pc):
-        proc = offline.process_take(chain, take, preset_json(Pc, base), short=short)
-        return score.scorecard(proc, Pc, goal, quality=q, taste=tst)
+
+def _slim(a):
+    return {k: a[k] for k in _KEEP if k in a}
+
+
+def _setup(spec):
+    _W.clear()
+    _W.update(spec)
+    _W["chain"] = offline.LV2Chain() if spec["exact"] else offline.ApproxChain()
+    _W["q"] = quality.load() if spec["quality"] else None
+
+
+def _worker_init(spec):
+    signal.signal(signal.SIGINT, signal.SIG_IGN)        # Ctrl+C is handled by the main process
+    _setup(spec)
+
+
+def _score(Pc):
+    proc = offline.process_take(_W["chain"], _W["take"], preset_json(Pc, _W["base"]), short=_W["short"])
+    s, parts, a = score.scorecard(proc, Pc, _W["goal"], quality=_W["q"], taste=_W["taste"])
+    return s, parts, _slim(a)
+
+
+def _shift_makeup(P, delta):
+    """Change the leveler's makeup and let the stages after it follow (as the tuning rounds do)."""
+    from .config import DEESS_FLOOR, clip
+    P["comp"]["makeup"] = round(P["comp"]["makeup"] + delta, 1)
+    if P["modules"].get("comp2"):
+        P["comp2"]["thr"] = round(P["comp2"]["thr"] + delta, 1)
+    for d in ("deess", "deess2"):
+        P[d]["thr"] = round(clip(P[d]["thr"] + delta, DEESS_FLOOR, -3), 1)
+
+
+def _loudness_polish(P, s, a, batch):
+    """The search lands near the loudness target; a few direct makeup corrections finish the job (kept only
+    when the whole score improves, so limits and the rest still win)."""
+    from .config import clip
+    tgt = P.get("target_lufs", -18.0)
+    for _ in range(3):
+        err = tgt - a["lufs"]
+        if abs(err) < 0.4:
+            break
+        cands = []
+        for f in (0.6, 0.9):
+            c = copy.deepcopy(P)
+            delta = clip(err * f, -c["comp"]["makeup"], c.get("max_gain", 12.0) - c["comp"]["makeup"])
+            if abs(delta) < 0.1:
+                continue
+            _shift_makeup(c, delta)
+            cands.append(c)
+        if not cands:
+            break
+        res = batch(cands)
+        k = min(range(len(res)), key=lambda i: res[i][0])
+        if res[k][0] >= s:
+            break
+        P, (s, _, a) = cands[k], res[k]
+    return P, s, a
+
+
+def default_jobs():
+    n = os.cpu_count() or 1
+    return max(1, min(8, n - 1))                         # leave one core for you (and EasyEffects)
+
+
+def run_optimise(P, take, args, st, base=None, out=print):
+    exact = bool(st["exact"][0])
+    chain_name = offline.LV2Chain.name if exact else offline.ApproxChain.name
+    use_q = bool(st["quality"][0]) and not getattr(args, "no_quality", False)
+    goal = choose_goal(args)
+    trials = int(getattr(args, "trials", None) or (300 if exact else 200))
+    tst = None if getattr(args, "no_taste", False) else taste.load_taste()[0]
+    short = 10 if exact else 8
+    jobs = int(getattr(args, "jobs", None) or default_jobs())
+    spec = {"exact": exact, "quality": use_q, "take": {k: (v[: int((short + 1) * 48000)] if k == "speech" else v)
+                                                        for k, v in take.items() if v is not None},
+            "goal": goal, "taste": tst, "base": base, "short": short}
+    pool, batch = None, None
+    if jobs > 1 and "fork" in mp.get_all_start_methods():
+        import warnings
+        from concurrent.futures import ProcessPoolExecutor
+        # fork: workers start instantly with everything already loaded (spawn/forkserver would re-import the
+        # program). Newer Pythons warn about fork in a process with threads (numpy's); the workers only run
+        # numpy/scipy code, which handles this, so the warning is silenced.
+        warnings.filterwarnings("ignore", message=".*fork.*", category=DeprecationWarning)
+        try:
+            pool = ProcessPoolExecutor(max_workers=jobs, mp_context=mp.get_context("fork"),
+                                       initializer=_worker_init, initargs=(spec,))
+        except (OSError, ValueError):
+            pool = None
+    state = {"pool": pool}
+
+    def batch(Ps):
+        if state["pool"] is not None:
+            try:
+                return list(state["pool"].map(_score, Ps))
+            except KeyboardInterrupt:
+                raise
+            except Exception:                            # a worker died: carry on in this process
+                state["pool"].shutdown(wait=False, cancel_futures=True)
+                state["pool"] = None
+                out("\n  (parallel workers stopped - continuing on one core)")
+        if not _W:
+            _setup(spec)
+        return [_score(p) for p in Ps]
+    if pool is None:
+        jobs = 1
+    evaluate = _score
+    chain = types_ns(name=chain_name, exact=exact, passthrough=offline.ApproxChain.passthrough)
 
     out(f"\nOptimising with the {chain.name} chain, goal '{goal}'"
-        + (", quality model on" if q else "") + f": {trials} tries on your recording...")
+        + (", quality model on" if use_q else "") + f": {trials} tries on your recording, "
+        f"{jobs} CPU core{'s' if jobs > 1 else ''}...  (Ctrl+C = stop early, keep the best so far)")
     passed = [k for k in chain.passthrough if P["modules"].get({"rnnoise": "rnnoise", "deepfilternet": "deep"}
                                                                  .get(k, "-"))]
     if passed:
@@ -123,10 +231,20 @@ def run_optimise(P, take, args, st, base=None, out=print):
             last["t"] = time.time()
             out(f"\r  {n}/{total}  score {best:.2f} (start {start:.2f})  {score.summary(a)}      ", end="")
 
-    with hidden_keys():
-        best, s_best, a_best, n = search.optimise(P, evaluate, trials=trials, progress=progress,
-                                                  seed=int(time.time()) % 1000)
+    info = {"workers": jobs}
+    try:
+        with hidden_keys():
+            best, s_best, a_best, n = search.optimise(P, evaluate, trials=trials, progress=progress,
+                                                      seed=int(time.time()) % 1000, batch=batch, info=info)
+        if not info.get("stopped") and best["modules"].get("comp"):
+            best, s_best, a_best = _loudness_polish(best, s_best, a_best, batch)
+    finally:
+        if state["pool"] is not None:
+            state["pool"].shutdown(wait=False, cancel_futures=True)
+        _W.clear()
     out("")
+    if info.get("stopped"):
+        out(f"  stopped early after {n} tries - keeping the best so far")
     best.pop("_eqg", None)
     out(f"  done in {time.time() - t0:.0f} s. Best: {score.summary(a_best)}")
     if a_best.get("rejected"):
@@ -137,6 +255,11 @@ def run_optimise(P, take, args, st, base=None, out=print):
     if not chain.exact:
         out("  (approximate model: the first round through EasyEffects confirms it and corrects what differs)")
     return best
+
+
+def types_ns(**kw):
+    import types
+    return types.SimpleNamespace(**kw)
 
 
 def changes(P0, P1):

@@ -363,7 +363,8 @@ def self_test(timeout=90):
     """Run the LV2 chain on a test preset in a SEPARATE process (a crashing plugin can't take us down).
     Returns (ok, report_lines)."""
     if not lilv_importable():
-        return False, ["lilv (python bindings) not installed - exact offline plugins unavailable"]
+        return False, ["lilv python bindings not installed - package python-lilv (Arch, CachyOS, Manjaro) or "
+                       "python3-lilv (Debian, Ubuntu, Fedora, openSUSE)"]
     try:
         r = subprocess.run([sys.executable, "-m", "v2ee.offline", "--selftest"], capture_output=True, text=True,
                            timeout=timeout, cwd=str(_pkg_root()))

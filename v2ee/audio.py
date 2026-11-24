@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import CACHE_DIR, PASSAGE, SR
+from .config import CACHE_DIR, FREE_TALK, PASSAGE, SR, TEST_SENTENCES
 from .term import hidden_keys
 
 # ----------------------------------------------------------------------------- sources and recording
@@ -228,18 +228,29 @@ def capture_live(device, args, short=False, raw=None):
         noise = record(ns, device)
         if route_problem(device):
             warn_route(device, route_problem(device))
-        print("\n[2] Speech - " + ("talk like you do on stream (or read the passage)" if short
-                                  else "read this at your normal volume:\n\n" + PASSAGE + "\n"))
-        countdown("Start talking", cd + 1)
-        raw_speech = None
-        if raw and raw != device:
-            speech, raw_speech = record_multi(ss, [device, raw])
-            if route_problem(raw):
-                warn_route(raw, route_problem(raw), "raw-mic recording (used to measure the added gain)")
-                print("   Ignoring it this round - the gain cap falls back to the makeup setting.")
-                raw_speech = None
-        else:
-            speech = record(ss, device)
+        mode = "short" if short else getattr(args, "speech_test", "read")
+        parts = {"short": [("talk like you do on stream (or read the passage)", ss)],
+                 "read": [("read this at your normal volume:\n\n" + PASSAGE + "\n", ss)],
+                 "free": [(FREE_TALK + "\n", getattr(args, "free_secs", 35))],
+                 "hybrid": [("part 1 of 2, free talk.\n" + FREE_TALK + "\n", getattr(args, "free_secs", 35)),
+                            ("part 2 of 2, read these at your normal volume:\n\n" + TEST_SENTENCES + "\n",
+                             getattr(args, "read_secs", 12))]}[mode]
+        speech, raw_speech, raw_ok = [], [], bool(raw and raw != device)
+        for n, (text, secs) in enumerate(parts):
+            print("\n[2] Speech - " + text)
+            countdown("Start talking" if n == 0 else "Keep going", cd + 1 if n == 0 else 2)
+            if raw_ok:
+                sp, rw = record_multi(secs, [device, raw])
+                if route_problem(raw):
+                    warn_route(raw, route_problem(raw), "raw-mic recording (used to measure the added gain)")
+                    print("   Ignoring it this round - the gain cap falls back to the makeup setting.")
+                    raw_ok = False
+                raw_speech.append(rw)
+            else:
+                sp = record(secs, device)
+            speech.append(sp)
+        speech = _join(speech)
+        raw_speech = _join(raw_speech) if (raw_ok and raw_speech) else None
         clicks = None
         if not args.no_click_test:
             print("\n[3] Your usual noise - do NOT talk; type and click like you do while streaming")
@@ -251,6 +262,21 @@ def capture_live(device, args, short=False, raw=None):
             countdown("Start", cd)
             taps = record(4 if short else getattr(args, "tap_secs", 5), device)
     return {"noise": noise, "speech": speech, "clicks": clicks, "taps": taps, "raw_speech": raw_speech}
+
+
+def _join(parts, fade=480):
+    """Join recordings with a 10 ms crossfade (no click at the seam)."""
+    out = np.asarray(parts[0], np.float32)
+    for p in parts[1:]:
+        p = np.asarray(p, np.float32)
+        if len(out) < fade or len(p) < fade:
+            out = np.concatenate([out, p])
+            continue
+        r = np.linspace(0, 1, fade, dtype=np.float32)
+        r = r[:, None] if out.ndim == 2 else r
+        mid = out[-fade:] * (1 - r) + p[:fade] * r
+        out = np.concatenate([out[:-fade], mid, p[fade:]])
+    return out
 
 
 def save_take(take, folder):
