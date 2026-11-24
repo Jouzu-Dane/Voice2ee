@@ -7,7 +7,7 @@ from scipy import signal
 
 from . import loudness
 from .audio import channel_imbalance, measure_gain, mono
-from .config import CACHE_DIR, FRAME, SR, TARGET_DB, TARGET_F
+from .config import CACHE_DIR, FRAME, LOW_SPLIT, SR, TARGET_DB, TARGET_F
 
 
 def frames_of(x, n=FRAME):
@@ -35,8 +35,15 @@ def estimate_f0(vfr):
     return float(np.median(f0s)) if len(f0s) >= 10 else 140.0
 
 
-def analyze(noise, speech, clicks=None):
-    """noise/speech/clicks: 1-D (mono) or (n, 2) arrays."""
+def _loud_channel(x):
+    x = np.asarray(x, dtype=np.float64)
+    if x.ndim == 1 or x.shape[1] < 2:
+        return None
+    return int(np.argmax((x ** 2).mean(axis=0)))
+
+
+def analyze(noise, speech, clicks=None, taps=None):
+    """noise/speech/clicks/taps: 1-D (mono) or (n, 2) arrays. taps = desk knocks / mic-stand bumps."""
     speech_st = speech
     noise, speech = mono(noise), mono(speech)
     clicks = mono(clicks) if clicks is not None else None
@@ -85,6 +92,36 @@ def analyze(noise, speech, clicks=None):
     smv = np.convolve(p[hm], np.ones(85) / 85, "valid")
     sib_peaky = float(10 * np.log10(smv.max() / (np.median(smv) + 1e-20) + 1e-20))
 
+    # low band (desk taps / thumps live here). Measured as PEAKS, like the tap catcher reacts: your voice's
+    # loudest bass peaks vs the loudest moment of each knock
+    lp = signal.butter(4, LOW_SPLIT, "low", fs=SR, output="sos")
+    n10 = FRAME // 5
+
+    def low_peaks(x):
+        y = np.abs(signal.sosfilt(lp, x))
+        m = len(y) // n10
+        return 20 * np.log10(y[: m * n10].reshape(m, n10).max(axis=1) + 1e-9)
+
+    low_v = low_peaks(speech[: len(lv) * FRAME])
+    v10 = np.repeat(voiced, 5)[: len(low_v)]
+    low_voice_hi = float(np.percentile(low_v[v10], 99)) if v10.any() else None
+    low_noise = float(np.median(low_peaks(noise)))
+    tap_low_hi, tap_n = None, 0
+    if taps is not None:
+        lt = low_peaks(mono(taps))
+        hot = lt > low_noise + 15.0
+        events, cur = [], None
+        for i, h in enumerate(hot):                 # group consecutive loud frames into knocks
+            if h:
+                cur = lt[i] if cur is None else max(cur, lt[i])
+            elif cur is not None:
+                events.append(cur); cur = None
+        if cur is not None:
+            events.append(cur)
+        tap_n = len(events)
+        if tap_n >= 2:
+            tap_low_hi = float(np.percentile(events, 75))    # a typical loud knock
+
     st = loudness.short_term(speech_st)
     return dict(
         noise_floor=noise_floor, speech_db=float(vlv.mean()),
@@ -100,12 +137,13 @@ def analyze(noise, speech, clicks=None):
         lv10=lv10, pk10=pk10, voiced50=voiced.astype(float),
         lufs=loudness.integrated(speech_st),
         lufs_st_max=float(st.max()) if len(st) else -70.0,
-        imbalance=channel_imbalance(speech_st),
+        imbalance=channel_imbalance(speech_st), loud_ch=_loud_channel(speech_st),
+        low_voice_hi=low_voice_hi, low_noise=low_noise, tap_low_hi=tap_low_hi, tap_n=tap_n,
     )
 
 
 def analyze_take(take):
-    a = analyze(take["noise"], take["speech"], take.get("clicks"))
+    a = analyze(take["noise"], take["speech"], take.get("clicks"), take.get("taps"))
     if take.get("raw_speech") is not None:
         a.update(measure_gain(take["raw_speech"], take["speech"]))
     return a

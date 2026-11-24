@@ -143,8 +143,45 @@ def limiter(x, p):
         y = y/thr
     return y
 
+def multiband_compressor(x, p):
+    """Enabled bands split by Linkwitz-Riley-ish crossovers; only bands with compressor-enable are compressed.
+    (voice2ee uses it as a 2-band 'desk-tap catcher'.)"""
+    splits = [p[f"band{i}"]["split-frequency"] for i in range(1, 8)
+              if p.get(f"band{i}", {}).get("enable-band")]
+    bands, rest = [], x
+    for f in splits:
+        sl = signal.butter(2, f, "low", fs=SR, output="sos")
+        sh = signal.butter(2, f, "high", fs=SR, output="sos")
+        bands.append(signal.sosfilt(sl, signal.sosfilt(sl, rest)))   # Linkwitz-Riley 4: LP + HP sum flat
+        rest = signal.sosfilt(sh, signal.sosfilt(sh, rest))
+    bands.append(rest)
+    out = np.zeros_like(x)
+    idx = [0] + [i for i in range(1, 8) if p.get(f"band{i}", {}).get("enable-band")]
+    for b, i in zip(bands, idx):
+        bp = p[f"band{i}"]
+        if bp.get("compressor-enable") and not bp.get("mute"):
+            from scipy.ndimage import maximum_filter1d
+            la = int(bp.get("sidechain-lookahead", 0) * SR / 1000)
+            d = np.concatenate([b[la:], np.zeros(la)]) if la > 0 else b
+            if bp.get("sidechain-mode") == "Peak":
+                env = dbv(maximum_filter1d(np.abs(d), size=max(1, int(bp.get("sidechain-reactivity", 5) * SR / 4000))))
+                L = np.array([e.max() for e in env[: len(env) // BLK * BLK].reshape(-1, BLK)])
+            else:
+                L = blocks(env_rms_db(d, bp.get("sidechain-reactivity", 10)))
+            r, thr = bp["ratio"], bp["attack-threshold"]
+            tgt = -np.maximum(L - thr, 0) * (1 - 1 / r)
+            g = smooth_db(tgt, bp.get("attack-time", 10), bp.get("release-time", 100))
+            b = apply_gain_db(b, g + bp.get("makeup", 0))
+        out += b
+    return out
+
+def identity(x, p):
+    return x
+
 PLUG = {"gate": gate, "expander": expander, "equalizer": equalizer, "compressor": compressor,
-        "deesser": deesser, "exciter": exciter, "limiter": limiter}
+        "deesser": deesser, "exciter": exciter, "limiter": limiter,
+        "multiband_compressor": multiband_compressor,
+        "deepfilternet": identity, "stereo_tools": identity, "level_meter": identity}  # not modelled
 
 def process(x, preset):
     """x: mono (n,) or stereo (n, 2); processed per channel-sum mono and returned in the same shape."""

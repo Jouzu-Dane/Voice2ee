@@ -195,7 +195,7 @@ def test_replay_rounds_end_to_end():
             loop.tune_loop(P, sess, measure, raw="alsa_input.podmic", test_mode="replay")
         txt = buf.getvalue()
         print("\n" + "\n".join(l for l in txt.splitlines() if l.startswith(("loudness", "EasyEffects", "  auto: loud",
-                                                                               "(EasyEffects confirmed", "Saved"))))
+                                                                               "(EasyEffects confirmed", "Saved", "!!", "    "))))
         assert "Replay didn't work" not in txt
         assert txt.count("loudness ") >= 2 and "EasyEffects adds" in txt
         assert "(EasyEffects confirmed" in txt
@@ -314,7 +314,7 @@ def test_mode2_without_raw():
     tmp, fake = _env()
     m, undo = _monkey()
     try:
-        seen = _run_mode2(["n"], tmp, m)                              # "Record your raw voice?" -> no
+        seen = _run_mode2(["", "n"], tmp, m)                            # "Record your raw voice?" -> no
         assert seen["test_mode"] == "live" and seen["raw"] is None and "captured" not in seen
     finally:
         undo()
@@ -325,7 +325,7 @@ def test_mode2_with_raw_records_through_bypass():
     tmp, fake = _env()
     m, undo = _monkey()
     try:
-        seen = _run_mode2(["", "1"], tmp, m)                          # yes (default), record once
+        seen = _run_mode2(["", "", "1"], tmp, m)                        # yes (default), record once
         assert seen["test_mode"] == "replay"
         assert seen["captured"] == ["easyeffects_source"]             # recorded the EasyEffects mic...
         assert "global_bypass:1" in fake.log and "global_bypass:0" in fake.log   # ...with effects bypassed

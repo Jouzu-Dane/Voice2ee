@@ -2,8 +2,8 @@
 import numpy as np
 
 from .analysis import bmean
-from .config import (DEESS_FLOOR, HI_SPREAD, LEVEL_HI, LEVEL_LO, MAX_BANDS, MAX_UP_STEP, SAFETY_MARGIN,
-                     TARGET_LUFS, clip)
+from .config import (DEESS_FLOOR, HI_SPREAD, MAX_BANDS, MAX_UP_STEP, SAFETY_MARGIN, TARGET_LUFS, clip,
+                     prof)
 from .eq import band_resid, glim, relayout, shift_range
 
 
@@ -71,7 +71,9 @@ def auto_adjust(P, a):
             msgs.append("EQ: " + ", ".join(ch[:8]) + (f" (+{len(ch) - 8} more)" if len(ch) > 8 else "") + " dB")
 
     if m["comp"]:
-        lo, hi = LEVEL_LO, LEVEL_HI
+        lo, hi = prof(P, "peak_lo"), prof(P, "peak_hi")      # speech-peak window of this profile
+        ceiling = P["limiter"] if m["limiter"] else hi
+        tol = prof(P, "lufs_tol")
         c1 = P["comp"]
         rb = P["comp2"] if m["comp2"] else c1
         p10, p95 = a.get("pkp10", a["pk5"]), a.get("pkp95", a["pk98"])
@@ -90,17 +92,17 @@ def auto_adjust(P, a):
             msgs.append(f"speech peaks spread only {rng_now:.0f} dB -> compressor {rb['ratio']:.1f}:1 -> {new:.1f}:1")
             rb["ratio"] = new
         # 2) loudness: move speech loudness (LUFS) toward the target, every round
-        if abs(err) > 1.0:
+        if abs(err) > tol:
             mk = c1["makeup"]
             cap = 30.0 if ag is not None else max(cap_cfg, mk)
             step = clip(0.8 * err, -6.0, MAX_UP_STEP)        # gentle going up; down can be faster
-            if a["peak_db"] > LEVEL_HI + 0.5:
-                step = min(step, LEVEL_HI - a["peak_db"])    # something got past the ceiling: come down
+            if a["peak_db"] > ceiling + 0.5:
+                step = min(step, ceiling - a["peak_db"])     # something got past the ceiling: come down
             limits = {}
             if step > 0:
                 # the limiter may lightly catch the loudest syllables: allow raising while under ~10% of speech
                 # frames touch the ceiling (within 1 dB); slow down from 5%, stop at 10%
-                frac = float(np.mean(np.asarray(a["vpk"]) > LEVEL_HI - 1.0))
+                frac = float(np.mean(np.asarray(a["vpk"]) > hi - 1.0))
                 limits["peaks"] = MAX_UP_STEP if frac < 0.05 else 0.75 if frac < 0.10 else 0.0
                 if ag is not None:
                     limits["gain"] = max(0.0, cap_cfg - ag)                            # gain on your voice <= cap
@@ -108,15 +110,16 @@ def auto_adjust(P, a):
                     limits["gain"] = min(limits.get("gain", 99), max(0.0, cap_cfg + HI_SPREAD - ag_hi))
                 step = min([step] + list(limits.values()))
             new = round(clip(mk + step, 0, cap), 1)
-            peak_bound = err > 1.0 and limits.get("peaks", 99) < 0.5 and limits.get("gain", 99) >= 0.5
-            if peak_bound and (rb["ratio"] < 6.0 or rb["thr"] > c1["thr"] + 1.0):
+            peak_bound = err > tol and limits.get("peaks", 99) < 0.5 and limits.get("gain", 99) >= 0.5
+            if (peak_bound and prof(P, "density") and m["comp2"]
+                    and (rb["ratio"] < 6.0 or rb["thr"] > c1["thr"] + 1.0)):
                 # 3) loud peaks are (nearly) at the ceiling but the voice is still too quiet: make it denser
                 #    (firmer compression, a little at a time) so the next rounds can raise the level safely
                 old_r, old_t = rb["ratio"], rb["thr"]
                 rb["ratio"] = round(min(6.0, old_r * 1.2), 2)
                 rb["thr"] = round(max(c1["thr"] + 1.0, old_t - 1.5), 1)
                 msgs.append(f"loudness {a['lufs']:.1f} LUFS is {err:.0f} LU under target and loud peaks are at the "
-                            f"{LEVEL_HI:.0f} dBFS ceiling -> denser: compressor {old_r:.1f}:1 -> {rb['ratio']:.1f}:1, "
+                            f"{hi:.0f} dBFS ceiling -> denser: compressor {old_r:.1f}:1 -> {rb['ratio']:.1f}:1, "
                             f"threshold {old_t:.1f} -> {rb['thr']:.1f} dB (level rises next round)")
             elif abs(new - mk) >= 0.1:
                 c1["makeup"] = new
@@ -133,6 +136,9 @@ def auto_adjust(P, a):
             elif err > 0 and mk >= cap - 0.05:
                 msgs.append(f"loudness is still low but makeup is at +{cap:.0f} dB - raise the mic's own gain by about "
                             f"{err:.0f} dB or move closer (or allow more with --max-gain)")
+            elif err > 0 and not prof(P, "density"):
+                msgs.append(f"loudness is {err:.0f} LU under target, but peaks already reach the {hi:.0f} dBFS headroom "
+                            "line - fine for a recording: normalise loudness in your editor")
             elif err > 0:
                 msgs.append(f"loudness is {err:.0f} LU under target with the compressor already firm and peaks "
                             f"at the ceiling - use a lower --target-lufs, or accept a slightly quieter voice")
@@ -144,7 +150,7 @@ def auto_adjust(P, a):
         s = a["sib_diff"] - b["sib"]
         if s > 3.0:
             # automatic tightening stops at ratio 4 and 6 dB below where it started (press 's' for more)
-            nr = min(4.0, d["ratio"] + 0.5)
+            nr = min(prof(P, "deess_cap"), d["ratio"] + 0.5)
             nt = round(max(d["thr0"] - 6.0, clip(d["thr"] - 1.5, DEESS_FLOOR, -3)), 1)
             if nr != d["ratio"] or nt != d["thr"]:
                 d["ratio"], d["thr"] = nr, nt
@@ -167,6 +173,25 @@ def auto_adjust(P, a):
             else:
                 msgs.append(f"{' / '.join(reasons)}, but the {m['noise']} is at its safe limit (use 'w' if words get cut)")
 
+    if m.get("taps") and P.get("taps") and a.get("tap_low_hi") is not None and a.get("low_voice_hi") is not None:
+        t = P["taps"]
+        rel = a["tap_low_hi"] - a["low_voice_hi"]          # how far knocks still stick out above your voice's bass
+        if rel > 4.0 and (t["thr"] > t.get("thr0", t["thr"]) - 9.0 or t["ratio"] < 20):
+            old_t, old_r = t["thr"], t["ratio"]
+            t["thr"] = round(max(t.get("thr0", t["thr"]) - 9.0, t["thr"] - 2.0), 1)
+            t["ratio"] = round(min(20.0, t["ratio"] * 1.25), 1)
+            msgs.append(f"desk knocks still {rel:+.0f} dB above your voice's bass -> tap catcher {old_r:g}:1 @ "
+                        f"{old_t:.1f} -> {t['ratio']:g}:1 @ {t['thr']:.1f} dB")
+
+    if m.get("stereo") == "auto" and a.get("imbalance", 0) > 10 and a.get("loud_ch") is not None:
+        if not P.get("stereo_fix"):
+            P["stereo_fix"] = "LL" if a["loud_ch"] == 0 else "RR"
+            msgs.append(f"your mic only reaches the {'left' if P['stereo_fix'] == 'LL' else 'right'} channel -> "
+                        "Stereo Tools added to copy it to both sides")
+        else:
+            msgs.append("still one-sided after the Stereo Tools fix - check its Stereo Matrix in EasyEffects is "
+                        f"'{'LR > LL' if P['stereo_fix'] == 'LL' else 'LR > RR'}'")
+
     if m["exciter"]:
         ex = P["exciter"]
         r_air = bmean(a, 8000, 12000)
@@ -183,14 +208,15 @@ FEEDBACK_HELP = """  What do you hear?  (several allowed, e.g. "b c")
     b boxy/muddy   t thin       d dull/muffled   h harsh/too bright
     s sharp "s"    c clicks still leak   w words getting cut
     u too quiet    l too loud   e echoey/roomy (room tails between words)
-    p plosives/pops still get through     m mouth clicks / lip smacks
+    p plosives/pops still get through     m mouth clicks / lip smacks     k desk knocks / taps
     + more EQ bands (finer detail)       - fewer EQ bands
   Enter = measure again      q / quit / exit = I'm happy: save the result and finish"""
 
 WORDS = {"boxy": "b", "muddy": "b", "thin": "t", "dull": "d", "muffled": "d", "harsh": "h", "bright": "h",
          "sibilant": "s", "clicks": "c", "chop": "w", "chopped": "w", "quiet": "u", "loud": "l",
          "more": "+", "fewer": "-", "pops": "p", "plosives": "p", "mouth": "m", "smacks": "m",
-         "echo": "e", "echoey": "e", "roomy": "e", "reverb": "e"}
+         "echo": "e", "echoey": "e", "roomy": "e", "reverb": "e", "knocks": "k", "taps": "k", "thumps": "k",
+         "bumps": "k"}
 
 
 def parse_feedback(text):
@@ -198,7 +224,7 @@ def parse_feedback(text):
     for w in text.lower().replace(",", " ").split():
         if w in WORDS:
             toks.append(WORDS[w])
-        elif all(ch in "btdhscwulepm+-" for ch in w):
+        elif all(ch in "btdhscwulepmk+-" for ch in w):
             toks += list(w)
         else:
             bad += 1
@@ -263,14 +289,28 @@ def manual_feedback(P, toks):
                 msgs.append("stronger de-essers")
             else:
                 off("de-esser")
+        elif t == "k":
+            if m.get("taps") and P.get("taps"):
+                tp = P["taps"]
+                tp["thr"] = round(max(tp.get("thr0", tp["thr"]) - 12.0, tp["thr"] - 3.0), 1)
+                tp["ratio"] = round(min(20.0, tp["ratio"] * 1.5), 1)
+                tp["split"] = float(min(220.0, tp["split"] + 20.0))
+                tp["thr0"] = tp.get("thr0", tp["thr"]) - 3.0   # you asked for more: let the automatic range follow
+                msgs.append(f"tap catcher firmer: {tp['ratio']:g}:1 above {tp['thr']:.1f} dB, up to {tp['split']:.0f} Hz "
+                            "(a boom arm / shock mount helps most)")
+            else:
+                off("desk-tap catcher")
         elif t == "c":
+            if m.get("deep") and P.get("deep"):
+                P["deep"]["atten"] = float(min(100.0, P["deep"]["atten"] + 10.0))
+                msgs.append(f"deep noise remover stronger (attenuation limit {P['deep']['atten']:.0f} dB)")
             if m["noise"]:
                 g = P["gate"]
                 g["thr"] = round(min(g["thr"] + 3, -10), 1)
                 g["max"] = round(min(max(g["max"], g["thr"] + 8), -10), 1)
-                msgs.append(f"{m['noise']} up to {g['thr']:.1f} dB")
-            else:
-                off("gate/expander")
+                msgs.append(f"{'expander' if m['noise'] == 'both' else m['noise']} up to {g['thr']:.1f} dB")
+            elif not m.get("deep"):
+                off("gate/expander/deep noise remover")
         elif t == "w":
             did = False
             if m["noise"]:
@@ -282,6 +322,9 @@ def manual_feedback(P, toks):
             if m["rnnoise"] and r["vad"]:
                 r["vad_thres"] = max(30.0, r["vad_thres"] - 10)
                 msgs.append(f"VAD {r['vad_thres']:g}%"); did = True
+            if m.get("deep") and P.get("deep"):
+                P["deep"]["atten"] = float(max(6.0, P["deep"]["atten"] - 10.0))
+                msgs.append(f"deep noise remover gentler ({P['deep']['atten']:.0f} dB)"); did = True
             if not did:
                 off("gate/expander/RNNoise VAD")
         elif t == "p":

@@ -245,14 +245,19 @@ def capture_live(device, args, short=False, raw=None):
             print("\n[3] Your usual noise - do NOT talk; type and click like you do while streaming")
             countdown("Start", cd)
             clicks = record(cs, device)
-    return {"noise": noise, "speech": speech, "clicks": clicks, "raw_speech": raw_speech}
+        taps = None
+        if not getattr(args, "no_tap_test", False):
+            print("\n[4] Desk knocks - do NOT talk; tap the desk, put your mug down, bump the mic arm a few times")
+            countdown("Start", cd)
+            taps = record(4 if short else getattr(args, "tap_secs", 5), device)
+    return {"noise": noise, "speech": speech, "clicks": clicks, "taps": taps, "raw_speech": raw_speech}
 
 
 def save_take(take, folder):
     from scipy.io import wavfile
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    for k in ("noise", "speech", "clicks"):
+    for k in ("noise", "speech", "clicks", "taps"):
         f = folder / f"{k}.wav"
         if take.get(k) is not None:
             wavfile.write(f, SR, np.asarray(take[k], dtype=np.float32))
@@ -266,7 +271,7 @@ def load_take(folder):
     if not (folder / "speech.wav").exists():
         return None
     take = {}
-    for k in ("noise", "speech", "clicks"):
+    for k in ("noise", "speech", "clicks", "taps"):
         f = folder / f"{k}.wav"
         take[k] = wavfile.read(f)[1].astype(np.float32) if f.exists() else None
     return take
@@ -379,4 +384,8 @@ def replay_take(take, ee_src, reload=None):
         if take.get("clicks") is not None:
             print("  ...keyboard/mouse noise...")
             clicks, _ = vm.play_record(take["clicks"], ee_src, lag=lag)
-    return {"noise": noise, "speech": speech, "clicks": clicks, "raw_speech": take["speech"]}
+        taps = None
+        if take.get("taps") is not None:
+            print("  ...desk knocks...")
+            taps, _ = vm.play_record(take["taps"], ee_src, lag=lag)
+    return {"noise": noise, "speech": speech, "clicks": clicks, "taps": taps, "raw_speech": take["speech"]}

@@ -4,10 +4,20 @@ import json
 import numpy as np
 
 from . import easyeffects as ee
-from .config import LEVEL_HI, SAFETY_MARGIN
+from .config import SAFETY_MARGIN, prof
 from .session import Session, next_version, save_state
 from .term import ask
 from .tuning import FEEDBACK_HELP, auto_adjust, manual_feedback, parse_feedback, region_summary, target_lufs
+
+
+RECORD_TIPS = """
+Recording tips (record profile):
+  * OBS: Settings > Output > Output Mode 'Advanced' > Recording: format MKV (or MOV), audio encoder PCM 32-bit
+    float (the exact name varies a little by OBS version). It stores exactly what EasyEffects outputs and can't
+    clip after this point - but it can't undo clipping at the mic itself, so keep the mic's own gain sensible.
+  * Add your RAW mic as a second audio track (Advanced Audio Properties > Tracks) as a safety copy.
+  * In DaVinci Resolve: normalise loudness at the end (YouTube plays back around -14 LUFS).
+  * This preset keeps headroom (peaks under -6 dBFS, safety limiter at -1) and natural dynamics on purpose."""
 
 
 def _snapshot(P):
@@ -64,7 +74,7 @@ def report(P, a):
     clickinfo = (f" | clicks {a['click_hi30'] - a['speech_lo30']:+.0f} dB vs quiet speech"
                  if a.get("click_hi30") is not None else "")
     print(f"\nloudness {a['lufs']:.1f} LUFS (target {tgt:.0f}) | speech peaks {a['pkp10']:.0f}..{a['pkp95']:.0f} dBFS, "
-          f"max {a['peak_db']:.1f} (ceiling {LEVEL_HI:.0f}) | SNR {a['snr']:.0f} dB | sibilance {a['sib_diff']:+.1f} dB"
+          f"max {a['peak_db']:.1f} (peaks aim under {prof(P, 'peak_hi'):.0f}, limiter {P['limiter']:.0f}) | SNR {a['snr']:.0f} dB | sibilance {a['sib_diff']:+.1f} dB"
           f"{clickinfo}")
     if a.get("applied_gain") is not None:
         warn = "  <-- too much!" if a["applied_gain"] > P.get("max_gain", 12.0) + SAFETY_MARGIN else ""
@@ -84,7 +94,7 @@ def tune_loop(P, sess, measure, base=None, base_file=None, raw=None, test_mode="
           f"{sess.stem}_v{next_version(sess.out, sess.stem, sess.ver)}.")
     apply(sess, sess.current, first=True)
     if test_mode == "live" and not raw:
-        print("(No raw mic: the gain EasyEffects adds isn't measured. The makeup cap, the -6 dBFS peak ceiling and "
+        print("(No raw mic: the gain EasyEffects adds isn't measured. The makeup cap, the limiter ceiling and "
               "the Threshold Boost check still apply.)")
     rnd, prev_sig, prev_changed, prev_mk, warned_mono = 0, None, False, None, False
     replay = test_mode == "replay"
@@ -101,7 +111,7 @@ def tune_loop(P, sess, measure, base=None, base_file=None, raw=None, test_mode="
             a = None
         if a is not None:
             report(P, a)
-            if a.get("imbalance", 0) > 10 and not warned_mono:
+            if a.get("imbalance", 0) > 10 and not warned_mono and P["modules"].get("stereo") != "auto":
                 warned_mono = True
                 print("!! Your mic comes out on one channel only of the EasyEffects mic (a mono mic seen as left-only), "
                       "so OBS may hear it on one side and quieter. Fix: add EasyEffects' 'Stereo Tools' at the top of "
@@ -168,6 +178,8 @@ def finish(P, sess, base, base_file=None, raw=None, test_mode="live"):
     apply(sess, name)
     sess.cleanup()
     print(f"\nSaved and loaded: {name}  ({path})")
+    if P.get("profile") == "record":
+        print(RECORD_TIPS)
     if sess.kept:
         print("Runs you kept: " + ", ".join(sess.kept))
     save_state(P, Session(sess.out, sess.stem, ver, name), base_file, raw, test_mode)  # --resume continues here

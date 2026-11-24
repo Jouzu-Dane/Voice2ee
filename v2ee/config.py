@@ -35,7 +35,40 @@ TARGET_DB = np.array([0, 3, 3, 2, 0, -5, -10, -17, -20], dtype=float)
 
 DEFAULT_KEYS = {"gate": "gate#0", "expander": "expander#0", "rnnoise": "rnnoise#0", "eq": "equalizer#0",
                 "comp": "compressor#0", "comp2": "compressor#1", "deess": "deesser#0", "deess2": "deesser#1",
-                "exciter": "exciter#0", "limiter": "limiter#0"}
+                "exciter": "exciter#0", "limiter": "limiter#0", "deep": "deepfilternet#0",
+                "taps": "multiband_compressor#0", "stereo": "stereo_tools#0", "meter": "level_meter#0"}
+
+LOW_SPLIT = 150.0                        # Hz: below this, desk taps / thumps live (the "thump catcher" band)
+
+# Profiles: what each preset is FOR. Values are the targets the planner and tuner aim at.
+PROFILES = {
+    "stream": dict(
+        label="Streaming / voice chat - sounds finished live",
+        target_lufs=-18.0, peak_lo=-18.0, peak_hi=-6.0, limiter=-6.0, lufs_tol=1.0,
+        comp2=True, density=True, leveler_ratio=2.0, deess_cap=4.0, vad=True,
+        gate_reduction=-40.0, floor_reduction=-30.0, expander_ratio=2.5, deep_atten=40.0, name="stream-voice"),
+    "record": dict(
+        label="Recording video (lossless, edited later) - natural, with headroom",
+        target_lufs=-24.0, peak_lo=-20.0, peak_hi=-6.0, limiter=-1.0, lufs_tol=2.0,
+        comp2=False, density=False, leveler_ratio=1.8, deess_cap=3.0, vad=False,
+        gate_reduction=-20.0, floor_reduction=-20.0, expander_ratio=1.8, deep_atten=15.0, name="record-voice"),
+}
+
+# Best defaults per profile. noise: "gate" | "expander" | "both" | None.
+# rnnoise/deep: the noise removers ("deep" = EasyEffects' Deep noise remover, DeepFilterNet).
+# Where a default depends on DeepFilterNet being installed, cli.py adjusts it at run time.
+DEFAULT_MODULES = {
+    "stream": {"profile": "stream", "noise": "both", "rnnoise": True, "deep": False, "eq": True, "taps": True,
+               "comp": True, "deess": True, "exciter": False, "limiter": True, "stereo": "auto", "meter": True},
+    "record": {"profile": "record", "noise": "expander", "rnnoise": False, "deep": False, "eq": True,
+               "taps": True, "comp": True, "deess": True, "exciter": False, "limiter": True, "stereo": "auto",
+               "meter": True},
+}
+
+
+def prof(P, key):
+    """A profile target for preset P (P may override it, e.g. via --target-lufs)."""
+    return P.get(key, PROFILES[P.get("profile", "stream")][key])
 
 
 def clip(x, lo, hi):

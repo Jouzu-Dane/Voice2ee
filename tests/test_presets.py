@@ -29,6 +29,13 @@ REQUIRED = {
     "limiter": ["bypass", "mode", "oversampling", "dithering", "sidechain-type", "sidechain-preamp", "threshold",
                 "lookahead", "attack", "release", "stereo-link", "gain-boost", "alr", "alr-attack", "alr-release",
                 "alr-knee", "input-to-sidechain", "link-to-input"],
+    "multiband_compressor": ["bypass", "compressor-mode", "envelope-boost", "dry", "wet", "stereo-split",
+                             "band0", "band1", "band2", "band7"],
+    "deepfilternet": ["bypass", "attenuation-limit", "min-processing-threshold", "max-erb-processing-threshold",
+                      "max-df-processing-threshold", "min-processing-buffer", "post-filter-beta"],
+    "stereo_tools": ["bypass", "mode", "balance-in", "balance-out", "softclip", "mutel", "muter", "phasel",
+                     "phaser", "middle-level", "side-level", "stereo-base", "delay"],
+    "level_meter": ["bypass", "input-gain", "output-gain"],
 }
 
 
