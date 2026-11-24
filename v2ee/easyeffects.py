@@ -128,8 +128,10 @@ def render(P):
     sc = {"type": "Internal", "mode": "RMS", "source": "Middle", "preamp": 0.0,
           "reactivity": 30.0, "lookahead": 5.0, "stereo-split-source": "Left/Right"}
 
+    open_ms = float(g.get("attack", 8.0))
+
     def gate_block(thr, release, reduction):
-        return {**_io(), "attack": 8.0, "release": float(release),
+        return {**_io(), "attack": open_ms, "release": float(release),
                 "curve-threshold": round(float(thr), 1), "curve-zone": -3.0,
                 "hysteresis": True, "hysteresis-threshold": -3.0, "hysteresis-zone": -1.0,
                 "reduction": float(reduction), "makeup": 0.0, "dry": NEG_INF, "wet": 0.0, "stereo-split": False,
@@ -145,7 +147,7 @@ def render(P):
         order.append(K["gate"])
     if noise in ("expander", "both"):
         pl[K["expander"]] = {
-            **_io(), "mode": "Downward", "attack": 8.0, "release": float(g.get("release", 150.0)),
+            **_io(), "mode": "Downward", "attack": open_ms, "release": float(g.get("release", 150.0)),
             "threshold": round(g["thr"], 1), "release-threshold": NEG_INF,
             "ratio": float(g.get("ratio", 3.0)), "knee": -6.0, "makeup": 0.0,
             "dry": NEG_INF, "wet": 0.0, "stereo-split": False, **det_filters,
@@ -153,7 +155,8 @@ def render(P):
         order.append(K["expander"])
     if m["rnnoise"]:
         pl[K["rnnoise"]] = {**_io(), "enable-vad": bool(r["vad"]), "vad-thres": float(r["vad_thres"]),
-                            "release": 60.0, "wet": 0.0, "use-standard-model": True, "model-name": ""}
+                            "release": float(r.get("release", 60.0)), "wet": 0.0, "use-standard-model": True,
+                            "model-name": ""}
         order.append(K["rnnoise"])
     if m.get("deep"):
         pl[K["deep"]] = deep_block(P.get("deep") or {"atten": 40.0})
@@ -162,7 +165,7 @@ def render(P):
         pl[K["taps"]] = taps_block(P["taps"])
         order.append(K["taps"])
     if m["eq"]:
-        bands = [eq_band(e["hpf"], 0, 0.707, "Hi-pass", "x4")] + [
+        bands = [eq_band(e["hpf"], 0, 0.707, "Hi-pass", e.get("hpf_slope", "x4"))] + [
             eq_band(x["f"], x["g"], x["q"], x["t"]) for x in sorted(e["bands"], key=lambda y: y["f"])]
         side = {f"band{i}": b for i, b in enumerate(bands)}
         pl[K["eq"]] = {**_io(), "mode": "IIR", "num-bands": len(bands), "split-channels": False,
@@ -205,15 +208,19 @@ def render(P):
         order.append(K["exciter"])
     if m["deess"]:
         d1, d2 = P["deess"], P["deess2"]
-        pl[K["deess"]] = deess(d1, "Wide", d1["freq"] * 0.7, d1["freq"], 6.0, 1.0)
+        pl[K["deess"]] = deess(d1, "Wide", d1.get("split", d1["freq"] * 0.7), d1["freq"], 6.0, 1.0)
         order.append(K["deess"])
         if m["deess2"]:
-            pl[K["deess2"]] = deess(d2, "Split", d2["freq"] * 0.85, d2["freq"], 9.0, 4.0)
+            pl[K["deess2"]] = deess(d2, "Split", d2.get("split", d2["freq"] * 0.85), d2["freq"], 9.0,
+                                    d2.get("q", 4.0))
             order.append(K["deess2"])
     if m["limiter"]:
         pl[K["limiter"]] = {**_io(), "mode": "Herm Thin", "oversampling": "None", "dithering": "None",
                             "sidechain-type": "Internal", "sidechain-preamp": 0.0,
-                            "threshold": float(P["limiter"]), "lookahead": 5.0, "attack": 5.0, "release": 50.0,
+                            "threshold": float(P["limiter"]),
+                            "lookahead": float(P.get("lim_t", {}).get("lookahead", 5.0)),
+                            "attack": float(P.get("lim_t", {}).get("attack", 5.0)),
+                            "release": float(P.get("lim_t", {}).get("release", 50.0)),
                             "stereo-link": 100.0, "gain-boost": False,   # 'Threshold Boost' OFF
                             "alr": False, "alr-attack": 5.0, "alr-release": 50.0, "alr-knee": 0.0,
                             **_premix()}
@@ -616,24 +623,38 @@ VERIFY = {"compressor": ["threshold", "ratio", "makeup"], "gate": ["curve-thresh
           "deesser": ["threshold", "ratio"], "exciter": ["amount"], "rnnoise": ["enable-vad"]}
 
 
-def verify_loaded(preset):
+def verify_loaded(preset, full=False, budget=12.0):
     """Ask EasyEffects what it actually applied and compare with the preset. Returns a dict, or None if the
-    local server isn't available."""
+    local server isn't available.
+    full=False: on/off state + the values the tuner changes. full=True (first load): every number and switch
+    at the top level of every plugin. Text options (modes) are skipped - the server may report them as an
+    index. A plugin whose first extra properties are all unknown to the server is skipped after 3 misses, and
+    the whole check stops after `budget` seconds."""
     if server_path() is None:
         return None
     inp = preset["input"]
-    checked, unknown, bad = 0, 0, []
+    checked, unknown, bad, skipped = 0, 0, [], 0
+    t_end = time.monotonic() + budget
     for key in inp.get("plugins_order", []):
         base, _, idx = key.partition("#")
         blk = inp.get(key, {})
-        for prop in ["bypass"] + VERIFY.get(base, []):
+        props = ["bypass"] + VERIFY.get(base, [])
+        if full:
+            props += [k for k, v in blk.items() if k not in props and isinstance(v, (bool, int, float))]
+        misses = 0
+        for n, prop in enumerate(props):
             if prop not in blk:
+                continue
+            if time.monotonic() > t_end or (misses >= 3 and n >= len(VERIFY.get(base, [])) + 1):
+                skipped += 1
                 continue
             reply = server_send(f"get_property:input:{base}:{idx or 0}:{_camel(prop)}", want_reply=True)
             got = _parse(reply) if reply else None
             if got is None:
                 unknown += 1
+                misses += 1
                 continue
+            misses = 0
             want = blk[prop]
             checked += 1
             if isinstance(want, bool):
@@ -642,4 +663,4 @@ def verify_loaded(preset):
                 ok = abs(float(got) - float(want)) <= max(0.06, abs(float(want)) * 0.01)
             if not ok:
                 bad.append(f"{key} {prop}: preset {want}, EasyEffects reports {got}")
-    return {"checked": checked, "unknown": unknown, "mismatch": bad}
+    return {"checked": checked, "unknown": unknown, "mismatch": bad, "skipped": skipped}

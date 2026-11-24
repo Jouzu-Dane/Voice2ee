@@ -32,7 +32,7 @@ def apply(sess, name, first=False):
         ask(f"Couldn't reach EasyEffects. Load preset '{name}' in its Input tab, then press Enter (q = quit)... ")
         return
     try:
-        res = ee.verify_loaded(json.loads(path.read_text()))
+        res = ee.verify_loaded(json.loads(path.read_text()), full=first)
     except (OSError, ValueError):
         res = None
     if res is None:

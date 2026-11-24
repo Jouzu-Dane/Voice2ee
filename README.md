@@ -231,12 +231,23 @@ knocking on the desk (skipped if the tap catcher is off). From that it measures:
 | Noise floor | gate/expander threshold, RNNoise settings |
 | Your keyboard/mouse clicks vs your quietest speech | gate/expander threshold (set between them) |
 | Your desk knocks vs your voice's loudest bass | tap catcher threshold |
+| How long a knock rings | tap catcher release |
 | Left/right balance | automatic mono fix |
 | Pitch | high-pass frequency |
+| Rumble in the room and how strong your pops are | high-pass slope (18 or 24 dB/oct) and a few Hz higher with rumble |
+| Syllables per second | leveler, peak compressor and limiter release times |
+| How fast your syllables start | gate/expander opening time, peak compressor attack, limiter lookahead |
+| How long sound lingers after a word (word ending + room echo) and your pauses | gate/expander release (Stream: shorter than the echo; Record: natural) |
+| Where your "s" band starts and ends | de-esser split frequencies and the narrow de-esser's width (Q) |
+| Air (8–12 kHz), the "s" band, hiss at the top | exciter start (scope), ceiling and harmonics |
 | Spectrum vs a typical voice | EQ cuts and boosts (6–22 bands) |
 | Dynamic range (at 10 ms resolution) | compressor ratios and thresholds |
 | Sibilance level and how "spiky" it is | de-esser frequencies, thresholds, ratios |
 | Loudness (LUFS) | makeup gain (the first preset deliberately starts 3 dB low) |
+
+Every number in the preset is either **measured from you** (above) or a **deliberately fixed safety/neutral
+value**: pre-mix routing off, dry signal off, "listen" modes off, Threshold Boost off, sidechain sources, knee
+widths. Each note voice2ee prints says which measurement a setting came from.
 
 ### Tuning rounds
 
@@ -297,13 +308,13 @@ After each round, type one or more keys (e.g. `b c`), or the word in brackets:
 |---|---|---|
 | `b` | boxy / muddy | less 250–630 Hz |
 | `t` | thin | more 100–630 Hz |
-| `d` | dull / muffled | more presence and air (and exciter) |
-| `h` | harsh / too bright | less presence and air |
+| `d` | dull / muffled | more presence and air; exciter stronger and starting lower |
+| `h` | harsh / too bright | less presence and air; exciter gentler and starting higher |
 | `s` | sharp "s" | stronger de-essers |
 | `c` | clicks still leak | gate/expander threshold up, Deep noise remover stronger |
 | `w` | words getting cut | gate/expander down, RNNoise VAD gentler, Deep noise remover gentler |
 | `u` / `l` | too quiet / too loud | makeup ±, and the LUFS target moves with you |
-| `e` | echoey / roomy | faster gate release, less low-mids |
+| `e` | echoey / roomy | faster gate release, less low-mids (also automatic when word tails get longer after processing) |
 | `p` | plosives / pops | high-pass up |
 | `m` | mouth clicks / lip smacks | stronger de-esser, faster gate release |
 | `k` | desk knocks / taps | tap catcher: lower threshold, higher ratio, wider band |
@@ -418,6 +429,9 @@ keyboard clicks, at a real mic's levels. Tests that need it are skipped if ffmpe
 - LUFS against ffmpeg's EBU R128 meter
 - preset completeness
 - closed-loop tuning and gain safety
+- measurements reacting the right way: an echoey room lengthens word tails, a fast talker gets faster
+  release times, a dull voice gets a low exciter start and a bright one starts above the "s", rumble steepens the
+  high-pass
 - versioning
 - profiles, gate + expander order, tap catcher (knocks down ≥ 6 dB, voice bass unchanged), stereo fix, Deep noise
   remover detection, importing presets that use the new plugins
@@ -427,13 +441,11 @@ keyboard clicks, at a real mic's levels. Tests that need it are skipped if ffmpe
 
 ## Known limitations
 
-- **Not yet verified against a real EasyEffects:** the de-esser and exciter key names, and the sidechain filter
-  labels, come from exported presets and the plugin docs. The read-back check flags anything EasyEffects applies
-  differently.
-- **The simulator doesn't model the Deep noise remover** (it's treated as pass-through in the tests), and the
-  Multiband Compressor and Stereo Tools key names come from EasyEffects' source and exported presets. The read-back
-  check flags anything applied differently.
+- **The test simulator doesn't model the Deep noise remover** (it's treated as pass-through in the tests).
 - **EasyEffects can't host other plugins:** only its built-in effects (and DeepFilterNet through its own module).
+- **Read-back:** the first load checks every number and switch of every plugin (about 150 settings); later rounds
+  check the on/off states and the values the tuner changes. Text options (modes) aren't compared, because the
+  server may report them as numbers.
 - **Targets are heuristics:** the speech target curve, de-esser limits and gate placement are reasonable starting
   points, not universal truths. Your ears and the feedback keys have the final say.
 - **Record-once mode** briefly changes the system default input.

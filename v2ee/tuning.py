@@ -192,6 +192,18 @@ def auto_adjust(P, a):
             msgs.append("still one-sided after the Stereo Tools fix - check its Stereo Matrix in EasyEffects is "
                         f"'{'LR > LL' if P['stereo_fix'] == 'LL' else 'LR > RR'}'")
 
+    # echo check: after processing, sound should not linger longer after words than it did raw. If it does,
+    # compression/makeup is lifting the room tails ("echoey") -> close the noise stage sooner
+    tmg = P.get("timing") or {}
+    if (m["noise"] and tmg.get("decay") and a.get("decay_ms") is not None
+            and a["decay_ms"] > tmg["decay"] + 30 and P.get("profile", "stream") == "stream"):
+        g = P["gate"]
+        old = g.get("release", 150.0)
+        g["release"] = float(max(40, round(old * 0.8)))
+        g["thr"] = round(min(g["thr"] + 1.0, g.get("max", g["thr"] + 1.0)), 1)
+        msgs.append(f"word tails last {a['decay_ms']:.0f} ms after processing vs {tmg['decay']:.0f} ms raw (room echo "
+                    f"lifted) -> release {old:.0f} -> {g['release']:.0f} ms, threshold {g['thr']:.1f} dB")
+
     if m["exciter"]:
         ex = P["exciter"]
         r_air = bmean(a, 8000, 12000)
@@ -255,7 +267,11 @@ def manual_feedback(P, toks):
             if m["eq"]:
                 shift_range(P, 2200, 12000, 1.5 * sgn)
             if m["exciter"]:
-                P["exciter"]["amount"] = round(clip(P["exciter"]["amount"] + 0.5 * sgn, 0, 6), 2)
+                ex = P["exciter"]
+                ex["amount"] = round(clip(ex["amount"] + 0.5 * sgn, 0, 6), 2)
+                ex["scope"] = round(clip(ex.get("scope", 4000) - 500 * sgn, 3000, 10000))   # duller -> start lower
+                ex["ceil"] = round(clip(max(ex.get("ceil", 14000), ex["scope"] + 2000), 5000, 16000))
+                msgs.append(f"exciter {ex['amount']:.1f} dB from {ex['scope']:.0f} Hz")
             if m["eq"] or m["exciter"]:
                 msgs.append("more presence + air" if sgn > 0 else "less presence + air")
             else:
