@@ -90,12 +90,12 @@ def test_colours():
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             print("!! something broke")
             print("  auto:", "!! SAFETY: too loud")
-            print("✔ all good")
+            print("✓ all good")
             print("plain line")
     finally:
         os.environ.pop("VOICE2EE_COLORS", None)
     out = buf.getvalue().splitlines()
-    assert out[0].startswith("\033[31m") and out[1].startswith("\033[31m") and out[2].startswith("\033[32m")
+    assert out[0].startswith("\033[1;31m") and out[1].startswith("\033[1;31m") and out[2].startswith("\033[32m")
     assert out[3] == "plain line"
 
 

@@ -24,20 +24,22 @@ def full_status(run_selftest=True):
     return {"exact": exact, "quality": quality.status(), "deep": ee.deep_available()}
 
 
-def print_full_status(st):
+def print_full_status(st, expect_quality=False):
+    """Prints the status; returns True if the real plugins work (and the quality model, if expected)."""
     ok_e, lines = st["exact"]
     ok_q, why_q = st["quality"]
     print("\nFull version components:")
-    print((good if ok_e else bad)(f"  {'✔' if ok_e else '✘'} exact offline plugins (lilv + your LSP/Calf LV2 plugins)"))
+    print((good if ok_e else bad)(f"  {'✓' if ok_e else '✗'} exact offline plugins (lilv + your LSP/Calf LV2 plugins)"))
     for l in lines:
         print(f"      {l}")
-    print((good if ok_q else bad)(f"  {'✔' if ok_q else '✘'} quality model (DNSMOS on onnxruntime): {why_q}"))
+    print((good if ok_q else bad)(f"  {'✓' if ok_q else '✗'} quality model (DNSMOS on onnxruntime): {why_q}"))
     d = st["deep"]
-    print((good if d is True else bad)(f"  {'✔' if d is True else '?' if d == 'flatpak' else '✘'} DeepFilterNet "
+    print((good if d is True else bad)(f"  {'✓' if d is True else '?' if d == 'flatpak' else '✗'} DeepFilterNet "
                                        "(Deep noise remover)"))
     import os
     if not (ok_e and ok_q) and not os.environ.get("VOICE2EE_FROM_INSTALLER"):
         print("  Get the missing parts with:  ./install.sh --full   (see README: 'Minimal or Full')")
+    return bool(ok_e and (ok_q or not expect_quality))
 
 
 # ------------------------------------------------------------------------------------------- choices
@@ -228,14 +230,14 @@ def run_optimise(P, take, args, st, base=None, out=print):
 
     if not exact:
         why = next((l for l in st["exact"][1] if l.strip()), "real plugins not available")
-        out(f"\n(using the built-in model: {why})")
+        out(f"\nNote: using the built-in model: {why}")
     out(f"\nOptimising with the {chain.name} chain, goal '{goal}'"
         + (", quality model on" if use_q else "") + f": {trials} tries on your recording, "
         f"{jobs} CPU core{'s' if jobs > 1 else ''}...  (Ctrl+C = stop early, keep the best so far)")
     passed = [k for k in chain.passthrough if P["modules"].get({"rnnoise": "rnnoise", "deepfilternet": "deep"}
                                                                  .get(k, "-"))]
     if passed:
-        out(f"  (not simulated offline, so judged in the confirmation round: {', '.join(passed)})")
+        out(f"  Note: not simulated offline, so judged in the confirmation round: {', '.join(passed)}")
     t0 = time.time()
     last = {"t": 0.0}
 
@@ -259,15 +261,56 @@ def run_optimise(P, take, args, st, base=None, out=print):
     if info.get("stopped"):
         out(f"  stopped early after {n} tries - keeping the best so far")
     best.pop("_eqg", None)
-    out(good(f"  ✔ done in {time.time() - t0:.0f} s. Best: {score.summary(a_best)}"))
+    out(good(f"  ✓ done in {time.time() - t0:.0f} s. Best: {score.summary(a_best)}"))
     if a_best.get("rejected"):
         out(f"  !! even the best try breaks a limit ({a_best['rejected']}) - keeping the measured preset")
         return P
     for line in changes(P, best):
         out(f"   * {line}")
     if not chain.exact:
-        out("  (approximate model: the first round through EasyEffects confirms it and corrects what differs)")
+        out("  Note: built-in model - the first round through EasyEffects confirms it and corrects what differs")
+    if hasattr(args, "no_before_after") and not args.no_before_after:
+        return before_after(P, best, take, exact, base, out=out)
     return best
+
+
+def before_after(P0, best, take, exact, base=None, out=print, ask_fn=None, player=None):
+    """Play a short clip through the measured preset, then through the optimised one, at the same loudness, so
+    you hear what Optimise changed. Returns the preset to continue with (you can keep the measured one)."""
+    from . import loudness
+    ask_fn = ask_fn or (lambda p: ask(p))
+    player = player or taste.play
+    try:
+        chain = offline.LV2Chain() if exact else offline.ApproxChain()
+        clip = taste.listening_clip(take)
+        a = chain.process(clip, preset_json(P0, base))
+        b = chain.process(clip, preset_json(best, base))
+    except Exception as ex:
+        out(f"Note: couldn't make the before/after clips ({ex}) - continuing with the optimised preset")
+        return best
+    diff = loudness.integrated(b) - loudness.integrated(a)
+    a, b = taste.match_pair(a, b)
+    out("\nBefore / after: the same clip through the measured preset, then the optimised one. Both play at the same "
+        "loudness so you hear the sound itself" + (f" (in the preset the optimised one is {diff:+.1f} LU "
+                                                    f"{'louder' if diff > 0 else 'quieter'})" if abs(diff) >= 0.5 else "")
+        + ".")
+    while True:
+        try:
+            out("  playing BEFORE (measured preset)...")
+            player(a)
+            out("  playing AFTER  (optimised)...")
+            player(b)
+        except Exception as ex:
+            out(f"Note: couldn't play the clips ({ex}) - continuing with the optimised preset")
+            return best
+        s = ask_fn("  Enter = continue with the optimised preset   r = play again   k = keep the measured one: ")
+        s = s.strip().lower()
+        if s == "r":
+            continue
+        if s == "k":
+            out("  keeping the measured preset")
+            return P0
+        return best
 
 
 def types_ns(**kw):

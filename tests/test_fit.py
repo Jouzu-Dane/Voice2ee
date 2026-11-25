@@ -2,6 +2,7 @@
 exact LV2 host (against a fake lilv), DNSMOS wrapper (fake session), and the installer's editions."""
 import builtins
 import contextlib
+import copy
 import io
 import json
 import os
@@ -529,3 +530,63 @@ def test_trials_default_and_plugin_check():
         search.optimise = real
     txt = "\n".join(lines)
     assert "TRIALS=200" in txt and "using the built-in model: lilv python bindings not installed" in txt
+
+
+def test_selftest_with_all_plugins_and_check_full_exit_code():
+    """With every plugin present (fake lilv), the self-test passes and optional ports aren't reported; without
+    lilv, --check-full exits 1 so the installer can't claim everything works."""
+    src = (HERE / "test_fit.py").read_text()
+    code = "import numpy as np, types\n" + src[src.index("def _fake_lilv(latency=64):"):
+                                              src.index("def test_lv2_host_mapping_with_fake_lilv")]
+    code = code.replace('return Plugin() if str(node).endswith("compressor_stereo") else None', "return Plugin()")
+    code += "\n_m = _fake_lilv()\nWorld, Instance = _m.World, _m.Instance\n"
+    d = Path(tempfile.mkdtemp())
+    (d / "lilv.py").write_text(code)
+    env = dict(os.environ, PYTHONPATH=str(d))
+    r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, %r); from v2ee import offline; "
+                        "ok, lines = offline.self_test(); print(ok); print(lines)" % str(HERE.parent)],
+                       capture_output=True, text=True, env=env, timeout=200)
+    assert r.stdout.splitlines()[0] == "True", r.stdout + r.stderr
+    assert "sct" not in r.stdout.split("PORTS gate")[1].split("'")[0]          # optional port: not reported
+    r = subprocess.run([sys.executable, str(HERE.parent / "voice2ee.py"), "--check-full"], capture_output=True,
+                       text=True, timeout=200)
+    assert r.returncode == 1 and "✗ exact offline plugins" in r.stdout
+
+
+def test_before_after_after_optimise():
+    P, t = _P()
+    best = copy.deepcopy(P)
+    best["comp"]["makeup"] += 3
+    for b in best["eq"]["bands"]:
+        if 2000 <= b["f"] < 6000:
+            b["g"] += 3
+    played, lines = [], []
+    answers = iter(["r", ""])
+    got = fit.before_after(P, best, t, False, out=lambda *a: lines.append(" ".join(map(str, a))),
+                           ask_fn=lambda p: next(answers), player=lambda x: played.append(x))
+    assert got is best and len(played) == 4                                # played twice (r), then continued
+    from v2ee.loudness import integrated
+    assert abs(integrated(played[0]) - integrated(played[1])) < 0.2         # same loudness
+    txt = "\n".join(lines)
+    assert "BEFORE (measured preset)" in txt and "AFTER  (optimised)" in txt and "louder" in txt
+    answers = iter(["k"])
+    got = fit.before_after(P, best, t, False, out=lambda *a: None, ask_fn=lambda p: next(answers),
+                           player=lambda x: None)
+    assert got is P                                                         # kept the measured preset
+
+
+def test_warning_colours():
+    os.environ["VOICE2EE_COLORS"] = "on"
+    from v2ee import term
+    term.install_tinted_print()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            print("\nHeads-up: turn your volume down")
+            print("Note: using the built-in model: x")
+            print("!! SAFETY: too loud")
+            print("plain")
+    finally:
+        os.environ.pop("VOICE2EE_COLORS", None)
+    out = [l for l in buf.getvalue().splitlines() if l.strip()]
+    assert out[0].startswith("\033[1;33m") and out[1].startswith("\033[1;33m")   # warnings: bold yellow
+    assert out[2].startswith("\033[1;31m") and out[3] == "plain"                  # problems: bold red

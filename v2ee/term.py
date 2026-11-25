@@ -2,7 +2,9 @@
 import sys
 
 QUIT_WORDS = ("q", "quit", "exit")
-_CODES = {"green": "32", "red": "31", "yellow": "33", "cyan": "36", "bold": "1"}
+_CODES = {"green": "32", "red": "31", "yellow": "33", "cyan": "36", "bold": "1",
+          "alert": "1;33", "problem": "1;31"}
+WARN_HEADS = ("Heads-up", "Note:", "(Note:", "Warning", "Tip:")
 
 
 def colors_on():
@@ -40,7 +42,8 @@ def warn(text):
 
 
 def install_tinted_print():
-    """Every line the tool prints that starts with '!!' / '✘' turns red, '✔' green (only when colours are on)."""
+    """Every line the tool prints is coloured by how it starts (only when colours are on):
+    '!!' / '✗' problems bold red, 'Heads-up' / 'Note:' warnings bold yellow, '✓' confirmations green."""
     import builtins
     if getattr(builtins.print, "_v2ee", False):
         return
@@ -51,10 +54,14 @@ def install_tinted_print():
             text = sep.join(str(x) for x in a)
             body = text.lstrip("\r\n ")
             head = body.split(":", 1)[1].lstrip() if body.startswith(("auto:", "you:")) else body
-            if head.startswith(("!!", "✘")):
-                text = bad(text)
-            elif head.startswith("✔"):
-                text = good(text)
+            lead = text[: len(text) - len(text.lstrip("\r\n"))]   # keep leading newlines outside the colour
+            rest = text[len(lead):]
+            if head.startswith(("!!", "✗")):
+                text = lead + color(rest, "problem")   # a problem: bold red
+            elif head.startswith(WARN_HEADS):
+                text = lead + color(rest, "alert")     # a warning / heads-up: bold yellow
+            elif head.startswith("✓"):
+                text = lead + good(rest)
             return plain(text, end=end, file=file, flush=flush)
         return plain(*a, sep=sep, end=end, file=file, flush=flush)
     tinted._v2ee = True
@@ -64,9 +71,11 @@ def install_tinted_print():
 def tint(line):
     """Colour a status line by its content: '!!' problems red, confirmations green."""
     s = line.lstrip()
-    if s.startswith("!!") or s.startswith("✘"):
-        return bad(line)
-    if s.startswith("✔"):
+    if s.startswith("!!") or s.startswith("✗"):
+        return color(line, "problem")
+    if s.startswith(WARN_HEADS):
+        return color(line, "alert")
+    if s.startswith("✓"):
         return good(line)
     return line
 

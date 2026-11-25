@@ -38,9 +38,9 @@ for arg in "$@"; do
 done
 
 if [ -t 1 ]; then B=$'\e[1m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; N=$'\e[0m'; else B="" G="" Y="" R="" N=""; fi
-ok()   { printf '  %s✔%s %s\n' "$G" "$N" "$*"; }
-warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
-bad()  { printf '  %s✘%s %s\n' "$R" "$N" "$*"; }
+ok()   { printf '  %s✓%s %s\n' "$G" "$N" "$*"; }
+warn() { printf '  %s! %s%s\n' "$Y$B" "$*" "$N"; }      # whole line in bold yellow: easy to spot
+bad()  { printf '  %s✗ %s%s\n' "$R$B" "$*" "$N"; }      # whole line in bold red
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ------------------------------------------------------------------------------------------------ uninstall
@@ -544,9 +544,15 @@ echo
 STATUS=""
 if [ "$PLUGINS" = real ]; then
   echo "Checking your setup (runs your LV2 plugins once in a separate process)..."
-  VOICE2EE_DATA="$APP_DIR" VOICE2EE_FROM_INSTALLER=1 "$RUN_PY" "$APP_DIR/voice2ee.py" --check-full || true
+  CHECK_OK=1
+  EXPECT_Q=""; [ "$EDITION" = full ] && EXPECT_Q=1
+  VOICE2EE_DATA="$APP_DIR" VOICE2EE_FROM_INSTALLER=1 VOICE2EE_EXPECT_QUALITY="$EXPECT_Q" \
+    "$RUN_PY" "$APP_DIR/voice2ee.py" --check-full || CHECK_OK=0
   full_checks "$RUN_PY" quiet
   STILL=("${FULL_MISSING[@]}")
+  if [ "$CHECK_OK" = 0 ] && [ ${#FULL_MISSING[@]} -eq 0 ]; then
+    STILL+=("working-real-plugins")       # installed, but the self-test above failed
+  fi
   if [ "$EDITION" = full ]; then
     [ "$ORT_OK" = 0 ] && STILL+=("onnxruntime")
     [ "$MODEL_OK" = 0 ] && STILL+=("DNSMOS-model")
@@ -559,6 +565,9 @@ if [ "$PLUGINS" = real ]; then
       if [ ${#INSTALL[@]} -gt 0 ]; then warn "  ${INSTALL[*]} $p      # $(reason_for "$p")"
       else warn "  install: $p ($(reason_for "$p"))"; fi
     done
+    if [ "$CHECK_OK" = 0 ] && [ ${#FULL_MISSING[@]} -eq 0 ]; then
+      warn "  the real plugins are installed but the self-test above failed - please report the lines it printed"
+    fi
     [ "$ORT_OK" = 0 ] && warn "  onnxruntime: run ./install.sh --full again with internet (needs python venv + pip)"
     [ "$MODEL_OK" = 0 ] && warn "  DNSMOS model: run ./install.sh --full again with internet"
     warn "Until then voice2ee uses its built-in model / no quality score for those parts (everything still works)."
@@ -566,6 +575,6 @@ if [ "$PLUGINS" = real ]; then
   fi
 fi
 echo
-if [ -z "$STATUS" ] || [ "$STATUS" = " - all parts working" ]; then DC="$G"; MARK="✔"; else DC="$Y"; MARK="!"; fi
+if [ -z "$STATUS" ] || [ "$STATUS" = " - all parts working" ]; then DC="$G"; MARK="✓"; else DC="$Y"; MARK="!"; fi
 [ "$PLUGINS" = builtin ] && STATUS=", built-in plugin model"
 echo "${DC}${MARK} Done (${EDITION:-minimal} version${STATUS}).${N} Start EasyEffects, then run:  ${B}voice2ee${N}   (voice2ee --help for options)"

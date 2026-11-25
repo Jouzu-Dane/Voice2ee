@@ -15,6 +15,7 @@ ITEMS = [
      "what Optimise prioritises"),
     ("trials", "Optimise tries", "number", (20, 2000), None, "empty = automatic: 300 real plugins / 200 built-in"),
     ("jobs", "CPU cores for Optimise", "number", (1, 256), None, "empty = 75 % of your cores"),
+    ("before_after", "Before/after after Optimise", "bool", None, True, "play measured vs optimised preset"),
     ("finetune", "Fine-tune with", "choice", [ASK, "keys", "ab", "both"], ASK, "feedback keys, A/B picks or both"),
     ("offline", "Optimise/A-B processing", "choice", ["auto", "builtin"], "auto",
      "auto = your real plugins when they work, else the built-in model"),
@@ -78,6 +79,8 @@ def apply(args, parser, s=None):
         args.no_click_test = True
     if unset("no_tap_test") and not s["tap_test"]:
         args.no_tap_test = True
+    if unset("no_before_after") and not s["before_after"]:
+        args.no_before_after = True
     if unset("no_taste") and not s["use_taste"]:
         args.no_taste = True
     if unset("no_quality") and not s["use_quality"]:

@@ -148,7 +148,7 @@ def choose_test_mode(args):
     missing = replay_available()
     if args.live or (missing and not args.replay):
         if missing and not args.live:
-            print(f"\n(Record-once mode needs {', '.join(missing)} - using live mode.)")
+            print(f"\nNote: record-once mode needs {', '.join(missing)} - using live mode.")
         return "live"
     if args.replay:
         return "replay"
@@ -294,6 +294,8 @@ def main():
                    help="A/B versions: instant (default) or replayed through EasyEffects")
     g.add_argument("--offline", choices=["auto", "builtin"], default="auto",
                    help="Optimise/A-B: your real plugins when they work (auto), or always the built-in model")
+    g.add_argument("--no-before-after", action="store_true",
+                   help="don't play the before/after comparison after Optimise")
     g.add_argument("--no-taste", action="store_true", help="don't start from your saved A/B taste")
     g.add_argument("--no-quality", action="store_true", help="don't use the quality model even if installed")
     g.add_argument("--check-full", action="store_true", help="show which Full-version parts are installed and work")
@@ -304,8 +306,9 @@ def main():
     settings.apply(args, ap)
 
     if args.check_full:
-        fit.print_full_status(fit.full_status())
-        return
+        import os
+        ok = fit.print_full_status(fit.full_status(), expect_quality=bool(os.environ.get("VOICE2EE_EXPECT_QUALITY")))
+        sys.exit(0 if ok else 1)
 
     if args.list_devices:
         print("Source names (use as --device / --ee-device):\n")
@@ -354,7 +357,7 @@ def main():
         raw = choose_raw(st.get("raw")) if (mode == "live" and st.get("raw")) else None
         take = load_take(TAKE_DIR) if mode == "replay" else None
         if mode == "replay" and take is None:
-            print("(No saved recording to replay - using live mode.)")
+            print("Note: no saved recording to replay - using live mode.")
             mode = "live"
         ee_src = choose_ee()
         ab = fit.make_ab_runner(take if take is not None else load_take(TAKE_DIR), ee_src, sess, base,
@@ -446,7 +449,7 @@ Record your raw (unprocessed) voice once?
     path = ee.write_preset(P, name0, out, args.base)
     sess = Session(out, stem, ver, name0)
     save_state(P, sess, raw=raw, mode=mode)
-    print(good(f"\n✔ Saved: {path}"))
+    print(good(f"\n✓ Saved: {path}"))
     print("\nNext, tuning measures the sound AFTER EasyEffects, so the preset gets loaded there.")
     if ee_src is None:
         try:

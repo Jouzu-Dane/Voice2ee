@@ -431,8 +431,11 @@ keeps improving and narrower when it doesn't. It uses 75 % of your CPU cores (`-
 change): each step of the search tries one variation per core at the same time. Typical run: 300 tries with your real
 plugins (a few minutes, depending on your CPU); 200 with the built-in model (well under a minute on an 8-core
 CPU). If it uses the built-in model, it says why. Press **Ctrl+C** to stop early: the best result so far is kept. A final step fine-tunes the
-loudness directly. The result is then loaded and confirmed in a normal round through
-EasyEffects. RNNoise and the Deep noise remover can't run offline, so they're judged in that round.
+loudness directly. When it's done, a **before/after** comparison plays a short clip
+(free talk, test sentences, a moment of keyboard noise) through the measured preset and then through the optimised
+one, at the same loudness so you hear the sound itself (the real loudness difference is stated). Press Enter to
+continue with the optimised preset, `r` to play again, or `k` to keep the measured one. The result is then loaded
+and confirmed in a normal round through EasyEffects. RNNoise and the Deep noise remover can't run offline, so they're judged in that round.
 
 ### A/B picks (step 3)
 
@@ -523,6 +526,7 @@ you always answer the same way:
 |---|---|
 | Profile, how to fit the first preset, Optimise goal, fine-tune method, tuning rounds | ask each time |
 | Optimise tries | automatic (300 exact / 200 approximate) |
+| Before/after after Optimise | on |
 | Optimise/A-B processing | auto: your real plugins when they work, else the built-in model |
 | A/B versions made with | auto (instant) |
 | CPU cores for Optimise | 75 % of your cores |
@@ -531,7 +535,7 @@ you always answer the same way:
 | EQ bands, gain cap, loudness target | 10, profile default, profile default |
 | Start from my saved A/B taste, use the quality model | on |
 | Raw mic, EasyEffects mic | ask / `easyeffects_source` |
-| Colours | auto (green = working, red = problem; `NO_COLOR` turns them off) |
+| Colours | auto: green = working, bold yellow = warning or heads-up, bold red = problem (`NO_COLOR` turns them off) |
 
 Settings are saved in `~/.config/voice2ee/settings.json`. Options typed on the command line still win for that
 run. `r` in the settings screen resets everything.
@@ -566,6 +570,7 @@ run. `r` in the settings screen resets everything.
 | `--finetune {keys,ab,both}` | asked | feedback keys, A/B picks first, or both |
 | `--ab-render {auto,easyeffects}` | auto | A/B versions made instantly, or replayed through EasyEffects |
 | `--offline {auto,builtin}` | auto | Optimise and A/B with your real plugins when they work, or always the built-in model |
+| `--no-before-after` | | skip the before/after comparison after Optimise |
 | `--no-taste` | | don't start from your saved taste |
 | `--no-quality` | | don't use the quality model even if installed |
 | `--check-full` | | show which Full-version parts are installed and work |
