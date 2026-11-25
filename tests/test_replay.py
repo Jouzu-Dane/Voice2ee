@@ -196,7 +196,7 @@ def test_replay_rounds_end_to_end():
             loop.tune_loop(P, sess, measure, raw="alsa_input.podmic", test_mode="replay")
         txt = buf.getvalue()
         print("\n" + "\n".join(l for l in txt.splitlines() if l.startswith(("loudness", "EasyEffects", "  auto: loud",
-                                                                               "✔ EasyEffects confirmed", "✔ Saved", "!!", "    "))))
+                                                                               "✓ EasyEffects confirmed", "✓ Saved", "!!", "    "))))
         assert "Replay didn't work" not in txt
         assert txt.count("loudness ") >= 2 and "EasyEffects adds" in txt
         assert "EasyEffects confirmed" in txt

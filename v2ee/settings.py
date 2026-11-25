@@ -13,9 +13,12 @@ ITEMS = [
     ("engine", "Fit the first preset", "choice", [ASK, "quick", "optimise"], ASK, "quick prediction or Optimise"),
     ("goal", "Optimise goal", "choice", [ASK, "balanced", "keyboard", "natural", "broadcast", "clarity"], ASK,
      "what Optimise prioritises"),
-    ("trials", "Optimise tries", "number", (20, 2000), None, "empty = automatic (300 exact / 200 approximate)"),
+    ("trials", "Optimise tries", "number", (20, 2000), None, "empty = automatic: 300 real plugins / 200 built-in"),
     ("jobs", "CPU cores for Optimise", "number", (1, 256), None, "empty = 75 % of your cores"),
+    ("before_after", "Before/after after Optimise", "bool", None, True, "play measured vs optimised preset"),
     ("finetune", "Fine-tune with", "choice", [ASK, "keys", "ab", "both"], ASK, "feedback keys, A/B picks or both"),
+    ("offline", "Optimise/A-B processing", "choice", ["auto", "builtin"], "auto",
+     "auto = your real plugins when they work, else the built-in model"),
     ("ab_render", "A/B versions made with", "choice", ["auto", "easyeffects"], "auto",
      "auto = instant; easyeffects = replay each version through EasyEffects (slower)"),
     ("test_mode", "Tuning rounds", "choice", [ASK, "replay", "live"], ASK, "record once and replay, or talk live"),
@@ -63,7 +66,7 @@ def apply(args, parser, s=None):
     def unset(dest):
         return getattr(args, dest, None) == parser.get_default(dest)
 
-    for key in ("profile", "engine", "goal", "finetune", "speech_test", "ab_render"):
+    for key in ("profile", "engine", "goal", "finetune", "speech_test", "ab_render", "offline"):
         if unset(key) and s[key] not in (ASK, None):
             setattr(args, key, s[key])
     for key in ("trials", "jobs", "free_secs", "read_secs", "bands", "max_gain", "target_lufs", "device",
@@ -76,6 +79,8 @@ def apply(args, parser, s=None):
         args.no_click_test = True
     if unset("no_tap_test") and not s["tap_test"]:
         args.no_tap_test = True
+    if unset("no_before_after") and not s["before_after"]:
+        args.no_before_after = True
     if unset("no_taste") and not s["use_taste"]:
         args.no_taste = True
     if unset("no_quality") and not s["use_quality"]:

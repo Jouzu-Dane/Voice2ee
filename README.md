@@ -22,8 +22,8 @@ sounds right.
 - **Optimise:** tries a few hundred variations of the preset on your recording and keeps the best, judged
   by a scorecard (loudness, clicks, knocks, words kept, tone, sibilance, background noise)
 - **A/B picks:** pick the better of two versions about 12 times; voice2ee learns your taste and saves it
-- **Minimal or Full:** the small version needs only numpy and scipy; the Full version runs your real plugins
-  offline and adds a speech-quality model (see [Minimal or Full](#minimal-or-full))
+- **Minimal or Full:** both run your real EasyEffects plugins offline for Optimise and A/B picks; Full adds a
+  speech-quality model. A built-in plugin model is the optional fallback (see [Minimal or Full](#minimal-or-full))
 - **Versioned presets:** `name_v1` → `name_v1-1`, `name_v1-2`, … → `name_v2`. Nothing is overwritten.
 
 ---
@@ -96,7 +96,8 @@ The installer:
 
 | Command | What it does |
 |---|---|
-| `./install.sh --minimal` | Install the Minimal version (no questions about the edition) |
+| `./install.sh --minimal` | Install the Minimal version with your real plugins (no questions about the edition) |
+| `./install.sh --builtin` | Install the Minimal version with the built-in plugin model only |
 | `./install.sh --full` | Install the Full version |
 | `./install.sh --check` | Only report what's installed or missing, for both versions |
 | `./install.sh --no-deps` | Install the tool without touching system packages |
@@ -124,26 +125,33 @@ python3 voice2ee.py
 
 ## Minimal or Full
 
-Both versions have every feature. The Full version does the heavy parts better.
+Both versions have every feature, and both use your **real EasyEffects plugins** for Optimise and A/B picks.
+Full adds a speech-quality model.
 
 | | **Minimal** | **Full** |
 |---|---|---|
-| Needs | Python, numpy, scipy, PipeWire tools | + lilv and the LSP/Calf LV2 plugins (usually already there with a native EasyEffects), onnxruntime (~60 MB, from pip into voice2ee's own virtualenv), the DNSMOS model (a few MB) |
-| Optimise | searches with a built-in **approximate** model of the plugins; the first round through EasyEffects confirms and corrects it | runs your **real** plugins offline: what it picks is what you hear |
-| A/B picks | instant, made with the built-in model | instant, made with your real plugins |
-| Quality score | – | DNSMOS, a model trained on human listening ratings, helps choose between candidates |
-| Download | nothing extra | needs internet once |
+| Needs | Python, numpy, scipy, PipeWire tools, `python-lilv` (about 240 KB) and the LSP/Calf LV2 plugins (usually already there with a native EasyEffects) | Minimal + onnxruntime (~60 MB, from pip into voice2ee's own virtualenv) and the DNSMOS model (a few MB) |
+| Optimise and A/B picks | your real plugins, offline: what it picks is what you hear | the same |
+| Quality score | – | DNSMOS, a model trained on human listening ratings, helps Optimise choose between candidates |
+| Download | small | needs internet once |
 
-**Choose Minimal if** you use the EasyEffects Flatpak, want it light and quick, have an older or slower PC, or
-just want a good preset without extras.
-**Choose Full if** you have a native EasyEffects, want the best possible fit, re-tune often, or use several mics or
-rooms.
+**Choose Minimal if** you want a great preset without big extras. **Choose Full if** you want the best possible
+fit, re-tune often, or use several mics or rooms.
 
-Switch any time with `./install.sh --full` or `./install.sh --minimal`. `voice2ee --check-full` shows which Full
-parts are installed and runs your plugins once in a separate process, so a broken plugin can't crash the tool.
+**The built-in model (optional fallback).** After choosing Minimal, the installer asks whether to use your real
+plugins (recommended) or voice2ee's built-in model only. The built-in model needs nothing extra: it's a numpy
+re-creation of the plugins, close but not exact, and every result is checked and corrected through EasyEffects
+afterwards. Pick it with the EasyEffects **Flatpak** (its plugins live inside the Flatpak) or if you don't want
+extra packages. voice2ee also falls back to it by itself whenever the real plugins don't work, and says why.
 
-> With the EasyEffects **Flatpak**, the plugins inside the Flatpak can be a different version from the ones on your
-> system, so the Full version's "exact" becomes "very close". The confirmation round catches any difference.
+| Command | What you get |
+|---|---|
+| `./install.sh --minimal` | Minimal with your real plugins |
+| `./install.sh --builtin` | Minimal with the built-in model only |
+| `./install.sh --full` | Full (real plugins + quality model) |
+
+Switch any time. `voice2ee --check-full` shows which parts are installed and runs your plugins once in a separate
+process, so a broken plugin can't crash the tool.
 
 ## Quick start
 
@@ -420,11 +428,14 @@ The scorecard:
 
 The search is a small evolution strategy: it tries variations around the best so far, searches wider while it
 keeps improving and narrower when it doesn't. It uses 75 % of your CPU cores (`--jobs` or Settings to
-change): each step of the search tries one variation per core at the same time. Typical run: 200 tries with the
-approximate model, well under a minute on an 8-core CPU (about 2 minutes on one core); 300 with the real plugins,
-a few minutes. Press **Ctrl+C** to stop early: the best result so far is kept. A final step fine-tunes the
-loudness directly. The result is then loaded and confirmed in a normal round through
-EasyEffects. RNNoise and the Deep noise remover can't run offline, so they're judged in that round.
+change): each step of the search tries one variation per core at the same time. Typical run: 300 tries with your real
+plugins (a few minutes, depending on your CPU); 200 with the built-in model (well under a minute on an 8-core
+CPU). If it uses the built-in model, it says why. Press **Ctrl+C** to stop early: the best result so far is kept. A final step fine-tunes the
+loudness directly. When it's done, a **before/after** comparison plays a short clip
+(free talk, test sentences, a moment of keyboard noise) through the measured preset and then through the optimised
+one, at the same loudness so you hear the sound itself (the real loudness difference is stated). Press Enter to
+continue with the optimised preset, `r` to play again, or `k` to keep the measured one. The result is then loaded
+and confirmed in a normal round through EasyEffects. RNNoise and the Deep noise remover can't run offline, so they're judged in that round.
 
 ### A/B picks (step 3)
 
@@ -444,6 +455,10 @@ one (`s` = can't tell, `x` = both bad, `r` = play again, `q` = stop). Each pair 
 A Bayesian preference model estimates where your taste sits and places the next pair where it's still least sure,
 so about 12 picks are enough. The result moves the preset and is **saved** (`~/.config/voice2ee/taste.json`):
 new presets start from it and Optimise aims for it. Use `--no-taste` to ignore it.
+
+After each pick, voice2ee tells you what the difference was and by how much, for example
+*"brightness: B was brighter. EQ at 2-6 kHz: A -3.2 dB, B +3.2 dB (you picked the brighter one)"*. It's shown
+only after you've answered, so the test stays blind, but you learn what you're actually choosing between.
 
 Each pair differs in **one** direction at a time, clearly at first (about 6 dB of EQ, for example) and finer
 as it learns, so every pick is an easy call.
@@ -511,6 +526,8 @@ you always answer the same way:
 |---|---|
 | Profile, how to fit the first preset, Optimise goal, fine-tune method, tuning rounds | ask each time |
 | Optimise tries | automatic (300 exact / 200 approximate) |
+| Before/after after Optimise | on |
+| Optimise/A-B processing | auto: your real plugins when they work, else the built-in model |
 | A/B versions made with | auto (instant) |
 | CPU cores for Optimise | 75 % of your cores |
 | Speech recording | hybrid (free talk + test sentences); free-talk and sentence lengths |
@@ -518,7 +535,7 @@ you always answer the same way:
 | EQ bands, gain cap, loudness target | 10, profile default, profile default |
 | Start from my saved A/B taste, use the quality model | on |
 | Raw mic, EasyEffects mic | ask / `easyeffects_source` |
-| Colours | auto (green = working, red = problem; `NO_COLOR` turns them off) |
+| Colours | auto: green = working, bold yellow = warning or heads-up, bold red = problem (`NO_COLOR` turns them off) |
 
 Settings are saved in `~/.config/voice2ee/settings.json`. Options typed on the command line still win for that
 run. `r` in the settings screen resets everything.
@@ -552,6 +569,8 @@ run. `r` in the settings screen resets everything.
 | `--jobs N` | 75 % of your cores | CPU cores Optimise may use |
 | `--finetune {keys,ab,both}` | asked | feedback keys, A/B picks first, or both |
 | `--ab-render {auto,easyeffects}` | auto | A/B versions made instantly, or replayed through EasyEffects |
+| `--offline {auto,builtin}` | auto | Optimise and A/B with your real plugins when they work, or always the built-in model |
+| `--no-before-after` | | skip the before/after comparison after Optimise |
 | `--no-taste` | | don't start from your saved taste |
 | `--no-quality` | | don't use the quality model even if installed |
 | `--check-full` | | show which Full-version parts are installed and work |

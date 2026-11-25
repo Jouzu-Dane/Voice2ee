@@ -46,7 +46,8 @@ def test_saved_settings_fill_in_but_command_line_wins():
 
 
 def test_settings_menu_changes_and_saves():
-    answers = iter(["1", "3", "5", "6", "12", "21", "2", ""])            # profile=video, jobs=6, clicks off, colours on
+    idx = {k: str(i) for i, (k, *_) in enumerate(settings.ITEMS, 1)}
+    answers = iter([idx["profile"], "3", idx["jobs"], "6", idx["click_test"], idx["colors"], "2", ""])
     builtins.input = lambda p="": next(answers)
     with contextlib.redirect_stdout(io.StringIO()) as buf:
         settings.menu()
@@ -89,12 +90,12 @@ def test_colours():
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             print("!! something broke")
             print("  auto:", "!! SAFETY: too loud")
-            print("✔ all good")
+            print("✓ all good")
             print("plain line")
     finally:
         os.environ.pop("VOICE2EE_COLORS", None)
     out = buf.getvalue().splitlines()
-    assert out[0].startswith("\033[31m") and out[1].startswith("\033[31m") and out[2].startswith("\033[32m")
+    assert out[0].startswith("\033[1;31m") and out[1].startswith("\033[1;31m") and out[2].startswith("\033[32m")
     assert out[3] == "plain line"
 
 

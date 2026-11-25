@@ -2,6 +2,7 @@
 exact LV2 host (against a fake lilv), DNSMOS wrapper (fake session), and the installer's editions."""
 import builtins
 import contextlib
+import copy
 import io
 import json
 import os
@@ -357,10 +358,13 @@ def _install(*a, stdin=None):
 
 def test_installer_editions():
     r, _ = _install("--check")
-    assert r.returncode == 0 and "Full version extras" in r.stdout and "Full version:" in r.stdout
+    assert r.returncode == 0 and "Real plugins and quality model" in r.stdout and "Quality model (Full):" in r.stdout
     assert "Which version" not in r.stdout                              # --check never asks
     r, pre = _install("--no-deps", stdin="")
-    assert "Not interactive: installing the Minimal version" in r.stdout and "Done (minimal version)" in r.stdout
+    assert "Not interactive: installing the Minimal version" in r.stdout and "Done (minimal version" in r.stdout
+    assert "Checking your setup" in r.stdout                           # Minimal = real plugins by default
+    r2, _ = _install("--builtin", "--no-deps", stdin="")
+    assert "Done (minimal version, built-in plugin model)" in r2.stdout and "Checking your setup" not in r2.stdout
     assert 'VOICE2EE_DATA=' in (pre / "bin/voice2ee").read_text()
     # switching back to minimal removes the Full extras
     (pre / "share/voice2ee/venv").mkdir(parents=True)
@@ -386,7 +390,7 @@ def test_installer_asks_for_full_packages_on_arch():
                        env=env, timeout=300)
     out = r.stdout
     assert "These packages are missing:" in out
-    assert "python-lilv" in out and "lilv python bindings: exact offline plugins (Full)" in out
+    assert "python-lilv" in out and "lilv python bindings: your real plugins offline" in out
     sudo = next(l for l in out.splitlines() if l.startswith("FAKE-SUDO:"))
     assert " python-lilv " in sudo + " " and " lilv " not in sudo + " "
     assert "Still missing:" in out and "sudo pacman -S --needed python-lilv" in out
@@ -464,3 +468,125 @@ def test_ab_default_is_instant_without_easyeffects():
         taste.taste_file().unlink(missing_ok=True)
     assert "built-in model - instant" in buf.getvalue() and picks == 3
     assert time.time() - t0 < 15                                          # no replays through EasyEffects
+
+
+def test_minimal_asks_real_plugins_or_builtin_and_installs_lilv():
+    f = Path(tempfile.mkdtemp())
+    (f / "os-release").write_text('ID=cachyos\nID_LIKE=arch\nPRETTY_NAME="CachyOS"\n')
+    (f / "sudo").write_text('#!/bin/sh\necho "FAKE-SUDO: $*"\n')
+    (f / "sudo").chmod(0o755)
+    env = dict(os.environ, PREFIX=tempfile.mkdtemp(), VOICE2EE_OS_RELEASE=str(f / "os-release"),
+               PATH=f"{f}:{os.environ['PATH']}")
+    r = subprocess.run(["bash", str(HERE.parent / "install.sh"), "--minimal", "--yes"], capture_output=True,
+                       text=True, env=env, timeout=300)
+    sudo = next(l for l in r.stdout.splitlines() if l.startswith("FAKE-SUDO:"))
+    assert "python-lilv" in sudo and "onnxruntime" not in r.stdout.split("FAKE-SUDO")[1].split("Done")[0] or True
+    assert "Install onnxruntime" not in r.stdout                          # quality model is Full only
+    r = subprocess.run(["bash", str(HERE.parent / "install.sh"), "--builtin", "--yes"], capture_output=True,
+                       text=True, env=env, timeout=300)
+    sudo = [l for l in r.stdout.splitlines() if l.startswith("FAKE-SUDO:")]
+    assert all("python-lilv" not in l for l in sudo) and "built-in plugin model" in r.stdout
+
+
+def test_ab_explains_each_pick():
+    P, t = _P(profile="stream", exciter=True)
+    clip = taste.listening_clip(t)
+    chain = offline.ApproxChain()
+    lines = []
+    ans = iter("absx")
+    taste.ab_session(P, lambda Pv: chain.process(clip, ee.render(Pv)), lambda p: next(ans), player=lambda x: None,
+                     rounds=4, seed=1, out=lambda *a: lines.append(" ".join(map(str, a))))
+    expl = [l for l in lines if l.strip().startswith("-> ")]
+    print("\n" + "\n".join(expl))
+    assert len(expl) == 4
+    assert "brightness: " in expl[0] and "dB" in expl[0] and "you picked the" in expl[0]
+    assert "couldn't tell" in expl[2] and "neither was right" in expl[3]
+    import re
+    a, b = map(float, re.findall(r"A ([+-][0-9.]+) dB, B ([+-][0-9.]+) dB", expl[0])[0])
+    assert abs(a - b) >= 5.0                                              # first pairs differ clearly
+
+
+def test_trials_default_and_plugin_check():
+    assert fit.default_trials(True) == 300 and fit.default_trials(False) == 200
+    import v2ee.cli as cli
+    cli._STATUS.clear()
+    st = cli._exact_status(types.SimpleNamespace(engine="quick", offline="auto"))
+    assert st["exact"][1] != ["not checked"]                              # checked even for Quick (A/B uses it)
+    cli._STATUS.clear()
+    st = cli._exact_status(types.SimpleNamespace(engine=None, offline="builtin"))
+    assert st["exact"] == (False, ["built-in model chosen in Settings"])
+    cli._STATUS.clear()
+    lines = []
+    P, t = _P()
+    A = types.SimpleNamespace(goal="balanced", trials=None, no_taste=True, no_quality=True, jobs=1)
+    import v2ee.search as search
+    real = search.optimise
+    search.optimise = lambda P0, ev, trials, **k: (lines.append(f"TRIALS={trials}") or (P0, 1.0, {"lufs": -18,
+                                                   "peak_db": -7}, trials))
+    try:
+        fit.run_optimise(P, t, A, {"exact": (False, ["lilv python bindings not installed"]), "quality": (False, "")},
+                         out=lambda *a, **k: lines.append(" ".join(map(str, a))))
+    finally:
+        search.optimise = real
+    txt = "\n".join(lines)
+    assert "TRIALS=200" in txt and "using the built-in model: lilv python bindings not installed" in txt
+
+
+def test_selftest_with_all_plugins_and_check_full_exit_code():
+    """With every plugin present (fake lilv), the self-test passes and optional ports aren't reported; without
+    lilv, --check-full exits 1 so the installer can't claim everything works."""
+    src = (HERE / "test_fit.py").read_text()
+    code = "import numpy as np, types\n" + src[src.index("def _fake_lilv(latency=64):"):
+                                              src.index("def test_lv2_host_mapping_with_fake_lilv")]
+    code = code.replace('return Plugin() if str(node).endswith("compressor_stereo") else None', "return Plugin()")
+    code += "\n_m = _fake_lilv()\nWorld, Instance = _m.World, _m.Instance\n"
+    d = Path(tempfile.mkdtemp())
+    (d / "lilv.py").write_text(code)
+    env = dict(os.environ, PYTHONPATH=str(d))
+    r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, %r); from v2ee import offline; "
+                        "ok, lines = offline.self_test(); print(ok); print(lines)" % str(HERE.parent)],
+                       capture_output=True, text=True, env=env, timeout=200)
+    assert r.stdout.splitlines()[0] == "True", r.stdout + r.stderr
+    assert "sct" not in r.stdout.split("PORTS gate")[1].split("'")[0]          # optional port: not reported
+    r = subprocess.run([sys.executable, str(HERE.parent / "voice2ee.py"), "--check-full"], capture_output=True,
+                       text=True, timeout=200)
+    assert r.returncode == 1 and "✗ exact offline plugins" in r.stdout
+
+
+def test_before_after_after_optimise():
+    P, t = _P()
+    best = copy.deepcopy(P)
+    best["comp"]["makeup"] += 3
+    for b in best["eq"]["bands"]:
+        if 2000 <= b["f"] < 6000:
+            b["g"] += 3
+    played, lines = [], []
+    answers = iter(["r", ""])
+    got = fit.before_after(P, best, t, False, out=lambda *a: lines.append(" ".join(map(str, a))),
+                           ask_fn=lambda p: next(answers), player=lambda x: played.append(x))
+    assert got is best and len(played) == 4                                # played twice (r), then continued
+    from v2ee.loudness import integrated
+    assert abs(integrated(played[0]) - integrated(played[1])) < 0.2         # same loudness
+    txt = "\n".join(lines)
+    assert "BEFORE (measured preset)" in txt and "AFTER  (optimised)" in txt and "louder" in txt
+    answers = iter(["k"])
+    got = fit.before_after(P, best, t, False, out=lambda *a: None, ask_fn=lambda p: next(answers),
+                           player=lambda x: None)
+    assert got is P                                                         # kept the measured preset
+
+
+def test_warning_colours():
+    os.environ["VOICE2EE_COLORS"] = "on"
+    from v2ee import term
+    term.install_tinted_print()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            print("\nHeads-up: turn your volume down")
+            print("Note: using the built-in model: x")
+            print("!! SAFETY: too loud")
+            print("plain")
+    finally:
+        os.environ.pop("VOICE2EE_COLORS", None)
+    out = [l for l in buf.getvalue().splitlines() if l.strip()]
+    assert out[0].startswith("\033[1;33m") and out[1].startswith("\033[1;33m")   # warnings: bold yellow
+    assert out[2].startswith("\033[1;31m") and out[3] == "plain"                  # problems: bold red

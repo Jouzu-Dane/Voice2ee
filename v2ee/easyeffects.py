@@ -608,8 +608,8 @@ def load_preset(name, path=None):
     cmd = ee_cmd(path or "", name)
     if shutil.which(cmd[0]):
         if not _warned_cli:
-            print("(EasyEffects' local server wasn't found, so presets are loaded with 'easyeffects -l', which can "
-                  "close its window. EasyEffects 8.0.9+ running in the background avoids that.)")
+            print("Note: EasyEffects' local server wasn't found, so presets are loaded with 'easyeffects -l', which can "
+                  "close its window. EasyEffects 8.0.9+ running in the background avoids that.")
             _warned_cli = True
         subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1.5)

@@ -9,8 +9,11 @@ Two chains:
 
 Check what's available:  voice2ee --check-full   (runs a self-test in a separate process, so a plugin that
 crashes can't take the tool down)."""
+import atexit
 import ctypes
 import json
+import os
+import weakref
 import subprocess
 import sys
 
@@ -21,7 +24,7 @@ from .config import NEG_INF, SR
 
 
 class ApproxChain:
-    name, exact = "approximate (built-in model)", False
+    name, exact = "built-in model (approximate)", False
     passthrough = ("rnnoise", "deepfilternet", "stereo_tools", "level_meter")
 
     def process(self, x, preset):
@@ -58,16 +61,17 @@ MAP = {
     "compressor": (LSP + "compressor_stereo", _SC + [
         ("mode", "cm", "e"), ("threshold", "al", "db"), ("release-threshold", "rrl", "db"), ("ratio", "cr", "f"),
         ("knee", "kn", "db"), ("boost-threshold", "bth", "db"), ("boost-amount", "bsa", "db")]),
-    "expander": (LSP + "expander_stereo", _SC + [
+    "expander": (LSP + "expander_stereo", [(k, "sct?" if sym == "sct" else sym, c) for k, sym, c in _SC] + [
         ("mode", "em", "e"), ("threshold", "al", "db"), ("release-threshold", "rrl", "db"), ("ratio", "er", "f"),
         ("knee", "kn", "db")]),
-    "gate": (LSP + "gate_stereo", _SC + [
+    "gate": (LSP + "gate_stereo", [(k, "sct?" if sym == "sct" else sym, c) for k, sym, c in _SC] + [
         ("curve-threshold", "gt", "db"), ("curve-zone", "gz", "db"), ("hysteresis", "gh", "b"),
         ("hysteresis-threshold", "ht", "db"), ("hysteresis-zone", "hz", "db"), ("reduction", "gr", "db")]),
     "limiter": (LSP + "limiter_stereo", [
         ("mode", "mode", "e"), ("oversampling", "ovs", "e"), ("dithering", "dith", "e"), ("threshold", "th", "db"),
         ("lookahead", "lk", "f"), ("attack", "at", "f"), ("release", "rt", "f"), ("gain-boost", "boost", "b"),
-        ("alr", "alr", "b"), ("alr-attack", "aat", "f"), ("alr-release", "art", "f"), ("alr-knee", "akn", "db"),
+        ("alr", "alr", "b"), ("alr-attack", "alr_at|aat?", "f"), ("alr-release", "alr_rt|art?", "f"),
+        ("alr-knee", "alr_kn|akn?", "db"),
         ("sidechain-preamp", "scp", "db"), ("stereo-link", "slink", "f")]),
     "deesser": (CALF + "Deesser", [
         ("detection", "detection", "e"), ("mode", "mode", "e"), ("threshold", "threshold", "db"),
@@ -104,7 +108,8 @@ def _get(blk, dotted):
 
 
 def control_values(kind, blk):
-    """[(symbol, conversion, value)] for one plugin block of a preset."""
+    """[(symbol, conversion, value)] for one plugin block of a preset. A symbol may list alternatives
+    ('alr_at|aat': the first one the plugin has is used) and end in '?' (optional: not reported if missing)."""
     out = [(sym, conv, _get(blk, key)) for key, sym, conv in MAP[kind][1]]
     if kind == "equalizer":
         for side, s in (("left", "l"), ("right", "r")):
@@ -152,7 +157,7 @@ def convert(conv, value, port):
 class LV2Chain:
     """Hosts the real plugins in-process with lilv (python bindings). Provides the URID map and options
     features LSP plugins need, buffers for their atom (UI message) ports, and compensates reported latency."""
-    name, exact = "exact (your real LV2 plugins)", True
+    name, exact = "your real plugins (exact)", True
     passthrough = ("rnnoise", "deepfilternet", "stereo_tools", "level_meter")
     BLOCK = 512
 
@@ -165,6 +170,15 @@ class LV2Chain:
         self.urids, self._keep = {}, []
         self.features = self._features()
         self.cache, self.problems = {}, {}
+        _LIVE.add(self)
+
+    def close(self):
+        """Free the plugin instances while lilv (and the plugin libraries) are still loaded."""
+        import gc
+        for st in self.cache.values():
+            st["inst"] = None
+        self.cache.clear()
+        gc.collect()
 
     # --- LV2 features: urid:map + options (block length, sample rate)
     def urid(self, uri):
@@ -279,9 +293,12 @@ class LV2Chain:
                 st["bufs"][p["index"]][0] = p["default"]
         missing = []
         for sym, conv, val in control_values(kind, blk):
-            port = st["ctl"].get(sym)
-            if port is None or port["dir"] != "in":
-                missing.append(sym)
+            optional = sym.endswith("?")
+            names = sym.rstrip("?").split("|")
+            port = next((st["ctl"][n] for n in names if n in st["ctl"] and st["ctl"][n]["dir"] == "in"), None)
+            if port is None:
+                if not optional:
+                    missing.append(names[0])
                 continue
             try:
                 st["bufs"][port["index"]][0] = convert(conv, val, port)
@@ -350,6 +367,18 @@ def _num(node):
     return None
 
 
+_LIVE = weakref.WeakSet()
+
+
+@atexit.register
+def _close_all():
+    for chain in list(_LIVE):
+        try:
+            chain.close()
+        except Exception:
+            pass
+
+
 # ------------------------------------------------------------------------------------------- availability
 def lilv_importable():
     try:
@@ -373,7 +402,8 @@ def self_test(timeout=90):
     lines = [l for l in r.stdout.splitlines() if l.strip()]
     if r.returncode != 0:
         tail = (r.stderr or "").strip().splitlines()[-3:]
-        return False, lines + [f"self-test failed (exit {r.returncode})"] + tail
+        why = " - a plugin crashed (signal 11)" if r.returncode == -11 else ""
+        return False, lines + [f"self-test failed (exit {r.returncode}){why}"] + tail
     return any(l.startswith("OK") for l in lines), lines
 
 
@@ -433,4 +463,8 @@ def _test_preset(finalize_mods):
 
 
 if __name__ == "__main__" and "--selftest" in sys.argv:
-    _selftest_main()
+    try:
+        _selftest_main()
+    finally:
+        sys.stdout.flush()
+        os._exit(0)                 # skip teardown: unloading some plugin libraries at exit can crash
