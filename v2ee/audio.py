@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import CACHE_DIR, PASSAGE, SR
+from .config import CACHE_DIR, FREE_TALK, PASSAGE, SR, TEST_SENTENCES
 from .term import hidden_keys
 
 # ----------------------------------------------------------------------------- sources and recording
@@ -81,7 +81,7 @@ def _meter(x):
     print("\r  [" + "#" * n + " " * (40 - n) + f"] {db:6.1f} dBFS ", end="", flush=True)
 
 
-def record_multi(seconds, devices, channels=2):
+def record_multi(seconds, devices, channels=2, meter=True):
     """Record several sources at the same time. Returns one (n, channels) float32 array per device."""
     need, blk = int(seconds * SR) * 4 * channels, int(0.05 * SR) * 4 * channels
     procs, bufs = [], [bytearray() for _ in devices]
@@ -123,7 +123,8 @@ def record_multi(seconds, devices, channels=2):
             time.sleep(0.05)
             n = len(bufs[0]) // 4 * 4
             if n >= blk:
-                _meter(np.frombuffer(bytes(bufs[0][n - blk:n]), dtype="<f4"))
+                if meter:
+                    _meter(np.frombuffer(bytes(bufs[0][n - blk:n]), dtype="<f4"))
     finally:
         for p in procs:
             p.terminate()
@@ -228,36 +229,71 @@ def capture_live(device, args, short=False, raw=None):
         noise = record(ns, device)
         if route_problem(device):
             warn_route(device, route_problem(device))
-        print("\n[2] Speech - " + ("talk like you do on stream (or read the passage)" if short
-                                  else "read this at your normal volume:\n\n" + PASSAGE + "\n"))
-        countdown("Start talking", cd + 1)
-        raw_speech = None
-        if raw and raw != device:
-            speech, raw_speech = record_multi(ss, [device, raw])
-            if route_problem(raw):
-                warn_route(raw, route_problem(raw), "raw-mic recording (used to measure the added gain)")
-                print("   Ignoring it this round - the gain cap falls back to the makeup setting.")
-                raw_speech = None
-        else:
-            speech = record(ss, device)
+        mode = "short" if short else getattr(args, "speech_test", "read")
+        parts = {"short": [("talk like you do on stream (or read the passage)", ss)],
+                 "read": [("read this at your normal volume:\n\n" + PASSAGE + "\n", ss)],
+                 "free": [(FREE_TALK + "\n", getattr(args, "free_secs", 35))],
+                 "hybrid": [("part 1 of 2, free talk.\n" + FREE_TALK + "\n", getattr(args, "free_secs", 35)),
+                            ("part 2 of 2, read these at your normal volume:\n\n" + TEST_SENTENCES + "\n",
+                             getattr(args, "read_secs", 12))]}[mode]
+        speech, raw_speech, raw_ok = [], [], bool(raw and raw != device)
+        for n, (text, secs) in enumerate(parts):
+            print("\n[2] Speech - " + text)
+            countdown("Start talking" if n == 0 else "Keep going", cd + 1 if n == 0 else 2)
+            if raw_ok:
+                sp, rw = record_multi(secs, [device, raw])
+                if route_problem(raw):
+                    warn_route(raw, route_problem(raw), "raw-mic recording (used to measure the added gain)")
+                    print("   Ignoring it this round - the gain cap falls back to the makeup setting.")
+                    raw_ok = False
+                raw_speech.append(rw)
+            else:
+                sp = record(secs, device)
+            speech.append(sp)
+        split = len(speech[0]) - 240 if len(speech) > 1 else None   # where the free talk ends (mid-crossfade)
+        speech = _join(speech)
+        raw_speech = _join(raw_speech) if (raw_ok and raw_speech) else None
         clicks = None
         if not args.no_click_test:
             print("\n[3] Your usual noise - do NOT talk; type and click like you do while streaming")
             countdown("Start", cd)
             clicks = record(cs, device)
-    return {"noise": noise, "speech": speech, "clicks": clicks, "raw_speech": raw_speech}
+        taps = None
+        if not getattr(args, "no_tap_test", False):
+            print("\n[4] Desk knocks - do NOT talk; tap the desk, put your mug down, bump the mic arm a few times")
+            countdown("Start", cd)
+            taps = record(4 if short else getattr(args, "tap_secs", 5), device)
+    return {"noise": noise, "speech": speech, "clicks": clicks, "taps": taps, "raw_speech": raw_speech,
+            "speech_split": split}
+
+
+def _join(parts, fade=480):
+    """Join recordings with a 10 ms crossfade (no click at the seam)."""
+    out = np.asarray(parts[0], np.float32)
+    for p in parts[1:]:
+        p = np.asarray(p, np.float32)
+        if len(out) < fade or len(p) < fade:
+            out = np.concatenate([out, p])
+            continue
+        r = np.linspace(0, 1, fade, dtype=np.float32)
+        r = r[:, None] if out.ndim == 2 else r
+        mid = out[-fade:] * (1 - r) + p[:fade] * r
+        out = np.concatenate([out[:-fade], mid, p[fade:]])
+    return out
 
 
 def save_take(take, folder):
     from scipy.io import wavfile
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    for k in ("noise", "speech", "clicks"):
+    for k in ("noise", "speech", "clicks", "taps"):
         f = folder / f"{k}.wav"
         if take.get(k) is not None:
             wavfile.write(f, SR, np.asarray(take[k], dtype=np.float32))
         elif f.exists():
             f.unlink()
+    import json
+    (folder / "meta.json").write_text(json.dumps({"speech_split": take.get("speech_split")}))
 
 
 def load_take(folder):
@@ -266,9 +302,14 @@ def load_take(folder):
     if not (folder / "speech.wav").exists():
         return None
     take = {}
-    for k in ("noise", "speech", "clicks"):
+    for k in ("noise", "speech", "clicks", "taps"):
         f = folder / f"{k}.wav"
         take[k] = wavfile.read(f)[1].astype(np.float32) if f.exists() else None
+    import json
+    try:
+        take["speech_split"] = json.loads((folder / "meta.json").read_text()).get("speech_split")
+    except (OSError, ValueError):
+        take["speech_split"] = None
     return take
 
 
@@ -320,7 +361,7 @@ class VirtualMic:
             self.reload()
         return self
 
-    def play_record(self, seg, ee_src, lead=0.4, tail=0.8, lag=None):
+    def play_record(self, seg, ee_src, lead=0.4, tail=0.8, lag=None, meter=True):
         """Play `seg` into the virtual mic while recording `ee_src`. Returns (processed, lag_samples)."""
         from scipy.io import wavfile
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -328,7 +369,8 @@ class VirtualMic:
         wavfile.write(tmp, SR, np.asarray(seg, dtype=np.float32))
         total = len(seg) / SR + lead + tail
         box = {}
-        t = threading.Thread(target=lambda: box.update(rec=record_multi(total, [ee_src])[0]), daemon=True)
+        t = threading.Thread(target=lambda: box.update(rec=record_multi(total, [ee_src], meter=meter)[0]),
+                             daemon=True)
         t.start()
         time.sleep(lead)
         player = (["pw-play", "--target", self.SINK, str(tmp)] if shutil.which("pw-play")
@@ -379,4 +421,8 @@ def replay_take(take, ee_src, reload=None):
         if take.get("clicks") is not None:
             print("  ...keyboard/mouse noise...")
             clicks, _ = vm.play_record(take["clicks"], ee_src, lag=lag)
-    return {"noise": noise, "speech": speech, "clicks": clicks, "raw_speech": take["speech"]}
+        taps = None
+        if take.get("taps") is not None:
+            print("  ...desk knocks...")
+            taps, _ = vm.play_record(take["taps"], ee_src, lag=lag)
+    return {"noise": noise, "speech": speech, "clicks": clicks, "taps": taps, "raw_speech": take["speech"]}

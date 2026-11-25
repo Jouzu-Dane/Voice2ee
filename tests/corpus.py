@@ -93,5 +93,24 @@ for i in range(6):
     sp = finish(take(i), i)
     wavfile.write(OUT/f"speech_{i}.wav", SR, sp)
     print(f"speech_{i}.wav  {len(sp)/SR:4.1f}s  peak {db(np.abs(sp).max()):6.1f} dBFS")
+def tap(r):
+    """A desk knock / mug put down / mic-arm bump, as it reaches a mic on a desk stand: a low thump that
+    travels through the stand (60-110 Hz, ~100 ms) plus a small click through the air."""
+    n = int(0.15*SR); t = np.arange(n)/SR
+    f = r.uniform(55, 110)
+    thump = np.sin(2*np.pi*f*t) * np.exp(-t/r.uniform(0.025, 0.05))
+    thump += 0.5*np.sin(2*np.pi*f*1.7*t) * np.exp(-t/0.02)
+    clk = click() * 0.25
+    out = thump.copy(); out[:len(clk)] += clk
+    return out / np.abs(out).max()
+def taps_take(seed, secs=6):
+    r = np.random.default_rng(seed)
+    out = np.zeros(secs*SR)
+    for k in range(9):
+        a = tap(r) * 10**(r.uniform(-16, -6)/20)         # a mug or knock near a desk-mounted mic: well above your voice's bass
+        o = int(r.uniform(0.2, secs-0.4)*SR); out[o:o+len(a)] += a
+    out += pink(len(out))*10**(-65/20)
+    return out.astype(np.float32)
+wavfile.write(OUT/"taps.wav", SR, taps_take(97))
 wavfile.write(OUT/"noise.wav", SR, finish(np.zeros(4*SR), 99, clicks=False, speech=False))
 wavfile.write(OUT/"clicks.wav", SR, finish(np.zeros(6*SR), 98, clicks=True, speech=False))

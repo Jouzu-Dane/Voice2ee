@@ -52,6 +52,26 @@ def short_term(x):
     return _lufs(_block_power(x, 3.0, 0.1))
 
 
+def loudness_range(x):
+    """Loudness range (LRA, EBU Tech 3342) in LU: how much the short-term loudness varies over the recording.
+    Spoken videos sit well at about 5-8 LU; raw speech is often 10-15. None if the recording is too short."""
+    st = _block_power(x, 3.0, 0.1)
+    if len(st) < 20:
+        return None
+    st = st[_lufs(st) > -70.0]                                 # absolute gate
+    if len(st) < 10:
+        return None
+    st = st[_lufs(st) > _lufs(st.mean()) - 20.0]               # relative gate: -20 LU
+    v = _lufs(st)
+    return float(np.percentile(v, 95) - np.percentile(v, 10))
+
+
+def true_peak(x):
+    """True peak in dBTP: the peak after 4x oversampling (what happens between samples after export)."""
+    y = signal.resample_poly(_as_channels(x), 4, 1, axis=0)
+    return float(20 * np.log10(np.abs(y).max() + 1e-12))
+
+
 def momentary(x):
     """400 ms momentary loudness every 100 ms ('M')."""
     return _lufs(_block_power(x, 0.4, 0.1))

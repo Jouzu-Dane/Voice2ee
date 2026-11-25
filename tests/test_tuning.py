@@ -15,9 +15,9 @@ from v2ee.analysis import analyze, analyze_take
 from v2ee.planner import initial_params
 
 
-def _run(feedback, rounds_take=None, target=-18.0, level_db=0.0):
+def _run(feedback, rounds_take=None, target=-18.0, level_db=0.0, profile="stream"):
     session.CACHE_DIR = Path(tempfile.mkdtemp())
-    A = args(target_lufs=target)
+    A = args(target_lufs=target, mods_dict={"profile": profile})
     k = 10 ** (level_db / 20)            # level_db > 0: as if you sat closer to the mic
     a0 = analyze(rd("noise.wav"), rd("speech_0.wav") * k, rd("clicks.wav"))
     P, _ = initial_params(a0, A)
@@ -36,12 +36,16 @@ def _run(feedback, rounds_take=None, target=-18.0, level_db=0.0):
         log.append(dict(makeup=P["comp"]["makeup"], gain=a.get("applied_gain"), lufs=a["lufs"], peak=a["peak_db"]))
         return a
 
+    real_apply = loop.apply
     loop.apply = lambda s, name, first=False: None
     answers = iter(feedback + ["q", "n"])
     builtins.input = lambda p="": next(answers)
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        loop.tune_loop(P, sess, measure, test_mode="replay" if rounds_take is not None else "live")
+    try:
+        with contextlib.redirect_stdout(buf):
+            loop.tune_loop(P, sess, measure, test_mode="replay" if rounds_take is not None else "live")
+    finally:
+        loop.apply = real_apply                     # don't leak the stub into other test files
     return log, buf.getvalue(), out
 
 

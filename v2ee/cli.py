@@ -6,71 +6,140 @@ import sys
 from pathlib import Path
 
 from . import easyeffects as ee
+from . import fit, taste
 from .analysis import analyze_take
 from .audio import (ReplayError, capture_live, list_sources, load_take, replay_available, replay_take, route_problem,
                     save_take, warn_route)
-from .config import MAX_BANDS, TAKE_DIR, TARGET_LUFS, clip
+from .config import DEFAULT_MODULES, MAX_BANDS, PROFILES, TAKE_DIR, clip
 from .loop import tune_loop
 from .planner import finalize_mods, initial_params
 from .session import Session, clean_name, load_state, next_version, save_state, split_name
-from .term import Quit, ask, pick, restore_terminal_on_exit
+from .term import Quit, ask, good, install_tinted_print, pick, restore_terminal_on_exit
 
 
 def menu():
     print("""
-voice2ee - streaming voice preset builder for EasyEffects
+voice2ee - voice preset builder for EasyEffects
 
-  1) New       - pick modules, record your RAW mic, analyze and write a new preset (name_v1), then keep
-                 re-measuring through the EasyEffects mic and refining until you're happy
+  1) New       - pick a profile and modules, record your RAW mic, analyze and write a new preset (name_v1),
+                 then keep re-measuring through the EasyEffects mic and refining until you're happy
   2) Existing  - load one of your existing presets, test it as-is through the EasyEffects mic, and tune it
-  3) Quit
+  3) Settings  - defaults for everything: profile, Optimise, CPU cores, recordings, devices, colours, ...
+  4) Quit
 
   Versions: each tuning run that changes something is saved as name_v1-1, name_v1-2, ... (you choose which
   to keep); when you finish, the result becomes name_v2. q / quit / exit work at every prompt.
 """)
     while True:
-        s = ask("Choose [1/2/3]: ", quit_raises=False).lower()
-        if s in ("3", "q"):
+        s = ask("Choose [1/2/3/4]: ", quit_raises=False).lower()
+        if s in ("4", "q"):
             raise Quit()
-        if s in ("1", "2"):
+        if s in ("1", "2", "3"):
             return s
 
 
-def choose_modules(args):
-    m = {"noise": "gate", "rnnoise": True, "eq": True, "comp": True, "deess": True, "exciter": False, "limiter": True}
+def choose_profile(args):
+    if args.profile:
+        return args.profile
+    print("""
+What is this preset for?
+
+  1) Stream  - Twitch, Discord, voice chat. Sounds finished the moment it leaves your PC.
+               -18 LUFS, peaks under -6 dBFS (OBS-friendly). Firm noise and click control: silence is
+               silent. Strongest compression, fastest gate.
+               Pick it when: you go live, or talk to people in real time.
+
+  2) Video   - videos that should need (almost) no audio editing. Finished sound straight out of OBS.
+               -16 LUFS (spoken YouTube level), true peaks under -1 dBTP, loudness range 5-8 LU (even,
+               not squashed). Clean background without audible gating. Full EQ and de-essing.
+               Pick it when: you record and only want to cut mistakes - no audio work in the editor.
+               Keep your raw mic on a second OBS track: the processing is baked in.
+
+  3) Record  - videos you'll finish in an editor (DaVinci Resolve etc.), recorded losslessly.
+               About -24 LUFS with headroom, natural dynamics, gentle cleanup, no hard gate. Only fixes
+               what's hard to fix later (rumble, boxiness, harsh "s", knocks).
+               Pick it when: you like to polish the sound yourself, or mix voice with music/effects.
+
+  Quick rule: live -> 1.  Upload as recorded -> 2.  Edit the audio afterwards -> 3.
+""")
+    while True:
+        s = ask("Choose [1/2/3]: ")
+        if s in ("", "1"):
+            return "stream"
+        if s == "2":
+            return "video"
+        if s == "3":
+            return "record"
+
+
+NOISE_CYCLE = ["both", "gate", "expander", None]
+NOISE_LABEL = {"both": "GATE + EXPANDER", "gate": "GATE", "expander": "EXPANDER", None: "off"}
+REMOVER_CYCLE = [("deep", False, True), ("rnnoise", True, False), ("both", True, True), ("off", False, False)]
+
+
+def default_modules(profile):
+    """The best default chain for a profile. RNNoise is the default remover; the Deep noise remover
+    (DeepFilterNet) can be picked in the checklist (item 2)."""
+    return dict(DEFAULT_MODULES[profile]), ee.deep_available()
+
+
+def choose_modules(args, profile="stream"):
+    m, deep = default_modules(profile)
     if args.modules:
         toks = {t.strip().lower() for t in args.modules.split(",") if t.strip()}
-        valid = {"gate", "expander", "rnnoise", "eq", "comp", "deess", "exciter", "limiter"}
+        valid = {"gate", "expander", "rnnoise", "deep", "eq", "taps", "comp", "deess", "exciter", "limiter",
+                 "stereo", "meter"}
         if toks - valid:
             sys.exit(f"Unknown module(s): {', '.join(sorted(toks - valid))}. Valid: {', '.join(sorted(valid))}")
-        if {"gate", "expander"} <= toks:
-            sys.exit("Choose either 'gate' or 'expander', not both.")
-        m = {"noise": "gate" if "gate" in toks else "expander" if "expander" in toks else None,
-             "rnnoise": "rnnoise" in toks, "eq": "eq" in toks, "comp": "comp" in toks,
-             "deess": "deess" in toks, "exciter": "exciter" in toks, "limiter": "limiter" in toks}
+        noise = ("both" if {"gate", "expander"} <= toks else "gate" if "gate" in toks
+                 else "expander" if "expander" in toks else None)
+        m = {"profile": profile, "noise": noise, "rnnoise": "rnnoise" in toks, "deep": "deep" in toks,
+             "eq": "eq" in toks, "taps": "taps" in toks, "comp": "comp" in toks, "deess": "deess" in toks,
+             "exciter": "exciter" in toks, "limiter": "limiter" in toks,
+             "stereo": "auto" if "stereo" in toks else None, "meter": "meter" in toks}
         return finalize_mods(m)
-    items = [("rnnoise", "RNNoise noise reduction (+ voice-activity gating)"),
-             ("eq", "Equalizer (+ steep high-pass for pops)"),
-             ("comp", "Compressors (leveler + fast; loudness in LUFS, peaks under -6 dBFS)"),
+    deep_note = {True: "installed", False: "NOT installed - see README", "flatpak": "Flatpak: usually bundled"}[deep]
+    items = [("eq", "Equalizer (+ steep high-pass for pops)"),
+             ("taps", "Desk-tap catcher (compresses only the thump band below ~150 Hz)"),
+             ("comp", "Compressors (" + {"stream": "leveler + fast peak catcher",
+                                         "video": "leveler + gentle peak catcher, aiming for an even loudness range",
+                                         "record": "gentle leveler only - recordings keep their dynamics"}[profile]
+              + ")"),
              ("deess", "De-essers (wide + narrow 'snake S'; both always enabled)"),
-             ("exciter", "Exciter (adds air/brightness - can emphasise sibilance)"),
-             ("limiter", "Limiter (peak ceiling)")]
-    cycle = ["gate", "expander", None]
+             ("exciter", "Exciter (adds air/brightness - can emphasise sibilance and clicks)"),
+             ("limiter", "Limiter (" + {"stream": "-6 dBFS ceiling", "video": "true peaks under -1 dBTP",
+                                        "record": "-1 dBFS safety only"}[profile] + ")"),
+             ("stereo", "Automatic mono fix (Stereo Tools, only added if your mic reaches one channel only)"),
+             ("meter", "Level meter at the end (watch loudness live in EasyEffects)")]
     while True:
-        print("\nWhat should the chain contain?  (type numbers to toggle, Enter to continue, q to quit)\n")
-        nz = {"gate": "GATE", "expander": "EXPANDER", None: "off"}[m["noise"]]
-        print(f"  1) Noise stage: {nz:<9} (gate OR expander - pressing 1 cycles gate / expander / off)")
-        for i, (k, label) in enumerate(items, 2):
-            print(f"  {i}) [{'x' if m[k] else ' '}] {label}")
+        print(f"\nWhat should the {profile} chain contain?  (defaults are the recommended setup - type numbers "
+              "to toggle, Enter to continue, q to quit)\n")
+        print(f"  1) Noise stage:   {NOISE_LABEL[m['noise']]:<16} (1 cycles: gate + expander / gate / expander / off)")
+        rem = next(name for name, rn, dp in REMOVER_CYCLE if (rn, dp) == (bool(m["rnnoise"]), bool(m["deep"])))
+        rem_label = {"deep": "DEEP NOISE REMOVER", "rnnoise": "RNNOISE", "both": "RNNOISE + DEEP", "off": "off"}[rem]
+        print(f"  2) Noise remover: {rem_label:<16} (2 cycles: deep / RNNoise / both / off; DeepFilterNet: {deep_note})")
+        for i, (k, label) in enumerate(items, 3):
+            on = m[k] == "auto" if k == "stereo" else bool(m[k])
+            print(f"  {i}) [{'x' if on else ' '}] {label}")
         s = ask("\nToggle: ")
         if not s:
+            if m["deep"] and deep is False:
+                print("  (Note: DeepFilterNet isn't installed, so EasyEffects will show the Deep noise remover as "
+                      "unavailable until you install it.)")
             return finalize_mods(m)
         for tok in s.replace(",", " ").split():
             if tok == "1":
-                m["noise"] = cycle[(cycle.index(m["noise"]) + 1) % 3]
-            elif tok.isdigit() and 2 <= int(tok) < 2 + len(items):
-                k = items[int(tok) - 2][0]
-                m[k] = not m[k]
+                m["noise"] = NOISE_CYCLE[(NOISE_CYCLE.index(m["noise"]) + 1) % len(NOISE_CYCLE)]
+            elif tok == "2":
+                idx = [n for n, _, _ in REMOVER_CYCLE].index(rem)
+                _, m["rnnoise"], m["deep"] = REMOVER_CYCLE[(idx + 1) % len(REMOVER_CYCLE)]
+                rem = REMOVER_CYCLE[(idx + 1) % len(REMOVER_CYCLE)][0]
+            elif tok.isdigit() and 3 <= int(tok) < 3 + len(items):
+                k = items[int(tok) - 3][0]
+                if k == "stereo":
+                    m[k] = None if m[k] == "auto" else "auto"
+                else:
+                    m[k] = not m[k]
             else:
                 print("  (ignored something that isn't a number from the list)")
 
@@ -189,23 +258,52 @@ def main():
     tm.add_argument("--replay", action="store_true", help="record once, replay it through EasyEffects every round")
     tm.add_argument("--live", action="store_true", help="talk live every round")
     ap.add_argument("--reuse", action="store_true", help="(mode 1) reuse the last raw recording instead of recording")
-    ap.add_argument("--target-lufs", type=float, default=TARGET_LUFS,
-                    help=f"speech loudness target in LUFS (default {TARGET_LUFS:g})")
+    ap.add_argument("--profile", choices=["stream", "video", "record"],
+                    help="what the preset is for: stream (live), video (ready to publish), record (edited later)")
+    ap.add_argument("--target-lufs", type=float, default=None,
+                    help="speech loudness target in LUFS (default: stream -18, video -16, record -24)")
     ap.add_argument("--noise-secs", type=float, default=4)
-    ap.add_argument("--speech-secs", type=float, default=20)
+    ap.add_argument("--speech-test", choices=["hybrid", "read", "free"], default="hybrid",
+                    help="speech recording: free talk + test sentences (default), read a passage, or free talk only")
+    ap.add_argument("--free-secs", type=float, default=35, help="free-talk part of the speech recording (s)")
+    ap.add_argument("--read-secs", type=float, default=12, help="test-sentence part of the hybrid recording (s)")
+    ap.add_argument("--speech-secs", type=float, default=20, help="length of the read-only recording (s)")
     ap.add_argument("--click-secs", type=float, default=6)
     ap.add_argument("--bands", type=int, default=10, help=f"total EQ bands incl. high-pass, 6-{MAX_BANDS} (default 10)")
     ap.add_argument("--no-click-test", action="store_true")
+    ap.add_argument("--no-tap-test", action="store_true", help="skip the desk-knock recording")
+    ap.add_argument("--tap-secs", type=float, default=5)
     ap.add_argument("--box-cut", type=float, default=0.0)
     ap.add_argument("--deess", type=float, default=1.0, help="initial de-esser strength: 0.3=light, 1=default, 2=strong")
     ap.add_argument("--makeup", type=float, default=0.0)
-    ap.add_argument("--max-gain", type=float, default=12.0, help="most gain (dB) the tool may add to your voice (default 12)")
+    ap.add_argument("--max-gain", type=float, default=None,
+                    help="most gain (dB) the tool may add to your voice (default: stream/record 12, video 16)")
     ap.add_argument("--gate-offset", type=float, default=0.0)
     ap.add_argument("--no-vad", action="store_true")
     ap.add_argument("--vad-thres", type=float, default=70.0)
     ap.add_argument("--base", help="(mode 1) existing exported preset JSON to merge the new values into")
     ap.add_argument("--out", help="preset directory (default: EasyEffects input preset folder)")
+    g = ap.add_argument_group("fitting (steps 2 and 3)")
+    g.add_argument("--engine", choices=["quick", "optimise"], help="(mode 1) quick prediction, or optimise on your "
+                   "recording (asked if not given)")
+    g.add_argument("--goal", choices=list(fit.score.GOALS), help="what the optimiser prioritises (asked if not given)")
+    g.add_argument("--trials", type=int, help="optimiser tries (default 300 exact / 200 approximate)")
+    g.add_argument("--jobs", type=int, help="CPU cores the optimiser may use (default: 75%% of your cores)")
+    g.add_argument("--finetune", choices=["keys", "ab", "both"], help="feedback keys, A/B picks, or both (asked)")
+    g.add_argument("--ab-render", choices=["auto", "easyeffects"], default="auto",
+                   help="A/B versions: instant (default) or replayed through EasyEffects")
+    g.add_argument("--no-taste", action="store_true", help="don't start from your saved A/B taste")
+    g.add_argument("--no-quality", action="store_true", help="don't use the quality model even if installed")
+    g.add_argument("--check-full", action="store_true", help="show which Full-version parts are installed and work")
     args = ap.parse_args()
+    import copy
+    from . import settings
+    typed = copy.copy(args)                       # what you typed, before saved settings fill in the rest
+    settings.apply(args, ap)
+
+    if args.check_full:
+        fit.print_full_status(fit.full_status())
+        return
 
     if args.list_devices:
         print("Source names (use as --device / --ee-device):\n")
@@ -247,7 +345,8 @@ def main():
             sys.exit("Saved state is from an older version of this script - start a new session from the menu.")
         P, sess, bf = st["P"], Session.from_dict(st["sess"]), st.get("base_file")
         base = json.loads(Path(bf).read_text()) if bf else None
-        P["max_gain"] = max(args.max_gain, P["comp"]["makeup"] if P["modules"]["comp"] else 0.0)
+        cap = args.max_gain if args.max_gain is not None else P.get("max_gain", 12.0)
+        P["max_gain"] = max(cap, P["comp"]["makeup"] if P["modules"]["comp"] else 0.0)
         print(f"Resuming with '{sess.current}'.")
         mode = "live" if args.live else ("replay" if (args.replay or st.get("test_mode") == "replay") else "live")
         raw = choose_raw(st.get("raw")) if (mode == "live" and st.get("raw")) else None
@@ -256,16 +355,23 @@ def main():
             print("(No saved recording to replay - using live mode.)")
             mode = "live"
         ee_src = choose_ee()
+        ab = fit.make_ab_runner(take if take is not None else load_take(TAKE_DIR), ee_src, sess, base,
+                                st=_exact_status(args), render_with=args.ab_render)
         tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=base, base_file=bf, raw=raw,
-                  test_mode=mode)
+                  test_mode=mode, ab=ab)
         return
 
     choice = args.mode or menu()
+    while choice == "3":
+        settings.menu()
+        vars(args).update(vars(settings.apply(copy.copy(typed), ap)))
+        choice = menu()
 
     if choice == "2":
         src = pick_preset(args, out)
         base = json.loads(src.read_text())
-        P, notes = import_preset_with_args(base, args)
+        profile = choose_profile(args)
+        P, notes = import_preset_with_args(base, args, profile)
         stem, ver = split_name(src.stem)
         sess = Session(src.parent, stem, ver or 1, src.stem)
         print(f"\nLoaded: {src}")
@@ -290,16 +396,24 @@ Record your raw (unprocessed) voice once?
         else:
             mode = "live"
         save_state(P, sess, str(src), raw, mode)
+        ab, start_ab = None, False
+        if take is not None:
+            ab = fit.make_ab_runner(take, ee_src, sess, base, st=_exact_status(args), render_with=args.ab_render)
+            start_ab = fit.choose_finetune(args) in ("ab", "both")
         final = tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=base,
-                          base_file=str(src), raw=raw, test_mode=mode)
+                          base_file=str(src), raw=raw, test_mode=mode, ab=ab, start_ab=start_ab)
         if final:
             print("Resume later with:  ./voice2ee.py --resume")
         return
 
     # 1) new preset
-    args.mods = choose_modules(args)
-    stem = clean_name(args.name or "") or clean_name(ask("\nName for the new preset [stream-voice]: ") or "stream-voice")
-    stem = split_name(stem)[0] or "stream-voice"
+    profile = choose_profile(args)
+    args.mods = choose_modules(args, profile)
+    if not args.mods.get("taps"):
+        args.no_tap_test = True                    # no tap catcher -> no need to record knocks
+    dflt = PROFILES[profile]["name"]
+    stem = clean_name(args.name or "") or clean_name(ask(f"\nName for the new preset [{dflt}]: ") or dflt)
+    stem = split_name(stem)[0] or dflt
     mode = choose_test_mode(args)
     ee_src = choose_ee() if (ee.server_path() is not None or mode == "replay") else None
     take = load_take(TAKE_DIR) if args.reuse else None
@@ -313,14 +427,24 @@ Record your raw (unprocessed) voice once?
     print_raw_analysis(a)
 
     P, notes = initial_params(a, args)
+    if not args.no_taste:
+        saved, picks = taste.load_taste()
+        mine = {k: v for k, v in saved.items() if k in taste.dims_for(P)}
+        if picks and any(abs(v) >= 0.05 for v in mine.values()):
+            P = taste.apply_taste(P, mine)
+            notes.append(f"Your saved taste (from {picks} A/B picks) applied: {taste.describe(mine)} "
+                         "(--no-taste to skip)")
     for n in notes:
         print(" *", n)
+    st = _exact_status(args)
+    if fit.choose_engine(args, st) == "optimise":
+        P = fit.run_optimise(P, take, args, st)
     ver = next_version(out, stem)
     name0 = f"{stem}_v{ver}"
     path = ee.write_preset(P, name0, out, args.base)
     sess = Session(out, stem, ver, name0)
     save_state(P, sess, raw=raw, mode=mode)
-    print(f"\nSaved: {path}")
+    print(good(f"\n✔ Saved: {path}"))
     print("\nNext, tuning measures the sound AFTER EasyEffects, so the preset gets loaded there.")
     if ee_src is None:
         try:
@@ -328,19 +452,36 @@ Record your raw (unprocessed) voice once?
         except Quit:
             print(f"\n'{name0}' is saved. Continue tuning later with:  ./voice2ee.py --resume")
             return
-    tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=args.base, raw=raw, test_mode=mode)
+    start_ab = fit.choose_finetune(args) in ("ab", "both")
+    ab = fit.make_ab_runner(take, ee_src, sess, args.base, st=st, render_with=args.ab_render)
+    tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=args.base, raw=raw, test_mode=mode,
+              ab=ab, start_ab=start_ab)
     print("Resume later with:  ./voice2ee.py --resume")
 
 
-def import_preset_with_args(base, args):
+_STATUS = {}
+
+
+def _exact_status(args):
+    """Full-version check, once per run (the LV2 self-test takes a few seconds)."""
+    if "st" not in _STATUS:
+        _STATUS["st"] = fit.full_status(run_selftest=getattr(args, "engine", None) != "quick")
+    return _STATUS["st"]
+
+
+def import_preset_with_args(base, args, profile="stream"):
     P, notes = ee.import_preset(base)
-    P["max_gain"] = max(args.max_gain, P["comp"]["makeup"] if P["modules"]["comp"] else 0.0)
-    P["target_lufs"] = float(args.target_lufs)
+    cap = args.max_gain if args.max_gain is not None else PROFILES[profile]["max_gain"]
+    P["max_gain"] = max(cap, P["comp"]["makeup"] if P["modules"]["comp"] else 0.0)
+    P["profile"] = profile
+    P["modules"]["profile"] = profile
+    P["target_lufs"] = float(args.target_lufs) if args.target_lufs is not None else PROFILES[profile]["target_lufs"]
     return P, notes
 
 
 def run():
     restore_terminal_on_exit()
+    install_tinted_print()
     try:
         main()
     except Quit:

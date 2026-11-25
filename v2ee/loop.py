@@ -4,10 +4,31 @@ import json
 import numpy as np
 
 from . import easyeffects as ee
-from .config import LEVEL_HI, SAFETY_MARGIN
+from .config import SAFETY_MARGIN, prof
+from .search import apply_overrides
 from .session import Session, next_version, save_state
-from .term import ask
+from .term import ask, good
 from .tuning import FEEDBACK_HELP, auto_adjust, manual_feedback, parse_feedback, region_summary, target_lufs
+
+
+RECORD_TIPS = """
+Recording tips (record profile):
+  * OBS: Settings > Output > Output Mode 'Advanced' > Recording: format MKV (or MOV), audio encoder PCM 32-bit
+    float (the exact name varies a little by OBS version). It stores exactly what EasyEffects outputs and can't
+    clip after this point - but it can't undo clipping at the mic itself, so keep the mic's own gain sensible.
+  * Add your RAW mic as a second audio track (Advanced Audio Properties > Tracks) as a safety copy.
+  * In DaVinci Resolve: normalise loudness at the end (YouTube plays back around -14 LUFS).
+  * This preset keeps headroom (peaks under -6 dBFS, safety limiter at -1) and natural dynamics on purpose."""
+
+
+VIDEO_TIPS = """
+Recording tips (video profile - ready to publish):
+  * OBS: Settings > Output > Recording: MKV (remux to MP4 afterwards) or MP4, audio AAC 320 kbps - or PCM if you
+    still want lossless. The voice is already at about -16 LUFS with true peaks under -1 dBTP.
+  * Strongly recommended: your RAW mic as a second audio track (Advanced Audio Properties > Tracks). The
+    processing is baked into track 1; track 2 lets you redo a take's sound if something ever goes wrong.
+  * Game audio / music: keep it about 10-15 dB under your voice in OBS (its level isn't part of this preset).
+  * Still worth doing in the edit: cut mistakes and long pauses. The voice itself needs no further processing."""
 
 
 def _snapshot(P):
@@ -22,7 +43,7 @@ def apply(sess, name, first=False):
         ask(f"Couldn't reach EasyEffects. Load preset '{name}' in its Input tab, then press Enter (q = quit)... ")
         return
     try:
-        res = ee.verify_loaded(json.loads(path.read_text()))
+        res = ee.verify_loaded(json.loads(path.read_text()), full=first)
     except (OSError, ValueError):
         res = None
     if res is None:
@@ -32,7 +53,7 @@ def apply(sess, name, first=False):
         for line in res["mismatch"][:8]:
             print("   ", line)
     elif first and res["checked"]:
-        print(f"(EasyEffects confirmed {res['checked']} settings, incl. every plugin's on/off state)")
+        print(good(f"✔ EasyEffects confirmed {res['checked']} settings, incl. every plugin's on/off state"))
 
 
 def _write_and_load(P, sess, name, base):
@@ -64,8 +85,19 @@ def report(P, a):
     clickinfo = (f" | clicks {a['click_hi30'] - a['speech_lo30']:+.0f} dB vs quiet speech"
                  if a.get("click_hi30") is not None else "")
     print(f"\nloudness {a['lufs']:.1f} LUFS (target {tgt:.0f}) | speech peaks {a['pkp10']:.0f}..{a['pkp95']:.0f} dBFS, "
-          f"max {a['peak_db']:.1f} (ceiling {LEVEL_HI:.0f}) | SNR {a['snr']:.0f} dB | sibilance {a['sib_diff']:+.1f} dB"
+          f"max {a['peak_db']:.1f} (peaks aim under {prof(P, 'peak_hi'):.0f}, limiter {P['limiter']:.0f}) | SNR {a['snr']:.0f} dB | sibilance {a['sib_diff']:+.1f} dB"
           f"{clickinfo}")
+    extra = []
+    if prof(P, "lra") and a.get("lra") is not None:
+        lo, hi = prof(P, "lra")
+        extra.append(f"loudness range {a['lra']:.1f} LU (aim {lo:g}-{hi:g})")
+    if prof(P, "true_peak") is not None and a.get("true_peak") is not None:
+        extra.append(f"true peak {a['true_peak']:.1f} dBTP (limit {prof(P, 'true_peak'):g})")
+    if a.get("long_pauses"):
+        extra.append(f"thinking pauses ({a['long_pauses']}): background {a['pause_db']:+.0f} dB vs your speech, "
+                     f"first word after a pause {a['restart_db']:+.1f} dB vs typical")
+    if extra:
+        print(" | ".join(extra))
     if a.get("applied_gain") is not None:
         warn = "  <-- too much!" if a["applied_gain"] > P.get("max_gain", 12.0) + SAFETY_MARGIN else ""
         print(f"EasyEffects adds {a['applied_gain']:+.1f} dB to your voice on average "
@@ -74,8 +106,27 @@ def report(P, a):
         print(f"vs target (dB): {region_summary(P, a)}   [{len(P['eq']['bands']) + 1} EQ bands]")
 
 
-def tune_loop(P, sess, measure, base=None, base_file=None, raw=None, test_mode="live"):
-    """measure(): returns an analysis of the CURRENT EasyEffects output (live talking or replayed recording)."""
+def _ab_round(P, sess, base, ab):
+    """Run A/B picks and move the preset to your taste. Returns the new run name or None."""
+    from .taste import apply_taste, describe
+    if ab is None:
+        print("(A/B picks need a recording of your voice - record once (mode 1, or 'record your raw voice' in "
+              "mode 2) to use them.)")
+        return None
+    t, picks = ab(P)
+    if not picks or not any(abs(v) >= 0.05 for v in t.values()):
+        return None
+    new = apply_taste(P, t)
+    P.clear(); P.update(new)
+    run = sess.new_run()
+    _write_and_load(P, sess, run, base)
+    print(f"  you: moved to your taste ({describe(t)})")
+    return run
+
+
+def tune_loop(P, sess, measure, base=None, base_file=None, raw=None, test_mode="live", ab=None, start_ab=False):
+    """measure(): returns an analysis of the CURRENT EasyEffects output (live talking or replayed recording).
+    ab: optional A/B runner (fit.make_ab_runner); start_ab: begin with A/B picks before the first round."""
     print("\nHeads-up: turn your headphone/speaker volume down a notch before the preset loads.")
     if P["modules"]["comp"] and not P["modules"]["limiter"]:
         print("!! This chain has compressors but no limiter, so sudden loud peaks are not capped.")
@@ -84,10 +135,15 @@ def tune_loop(P, sess, measure, base=None, base_file=None, raw=None, test_mode="
           f"{sess.stem}_v{next_version(sess.out, sess.stem, sess.ver)}.")
     apply(sess, sess.current, first=True)
     if test_mode == "live" and not raw:
-        print("(No raw mic: the gain EasyEffects adds isn't measured. The makeup cap, the -6 dBFS peak ceiling and "
+        print("(No raw mic: the gain EasyEffects adds isn't measured. The makeup cap, the limiter ceiling and "
               "the Threshold Boost check still apply.)")
     rnd, prev_sig, prev_changed, prev_mk, warned_mono = 0, None, False, None, False
     replay = test_mode == "replay"
+    if start_ab:
+        r = _ab_round(P, sess, base, ab)
+        if r:
+            sess.pending = r
+            save_state(P, sess, base_file, raw, test_mode)
     while True:
         rnd += 1
         if sess.pending and not _ask_keep(sess):
@@ -101,7 +157,7 @@ def tune_loop(P, sess, measure, base=None, base_file=None, raw=None, test_mode="
             a = None
         if a is not None:
             report(P, a)
-            if a.get("imbalance", 0) > 10 and not warned_mono:
+            if a.get("imbalance", 0) > 10 and not warned_mono and P["modules"].get("stereo") != "auto":
                 warned_mono = True
                 print("!! Your mic comes out on one channel only of the EasyEffects mic (a mono mic seen as left-only), "
                       "so OBS may hear it on one side and quieter. Fix: add EasyEffects' 'Stereo Tools' at the top of "
@@ -122,6 +178,7 @@ def tune_loop(P, sess, measure, base=None, base_file=None, raw=None, test_mode="
                 msgs = []
             else:
                 msgs = auto_adjust(P, a)
+            msgs += [f"(your lock) {x}" for x in apply_overrides(P)]
             for mm in msgs:
                 print("  auto:", mm)
             if not msgs and not stuck:
@@ -135,6 +192,11 @@ def tune_loop(P, sess, measure, base=None, base_file=None, raw=None, test_mode="
         fb = ask("> ", quit_raises=False)
         if fb != "q":
             toks = parse_feedback(fb)
+            if "a" in toks:
+                toks = [t for t in toks if t != "a"]
+                r = _ab_round(P, sess, base, ab)
+                if r:
+                    prev_changed, this_run = True, r
             if toks:
                 before = _snapshot(P)
                 for mm in manual_feedback(P, toks):
@@ -167,7 +229,11 @@ def finish(P, sess, base, base_file=None, raw=None, test_mode="live"):
     sess.current = name
     apply(sess, name)
     sess.cleanup()
-    print(f"\nSaved and loaded: {name}  ({path})")
+    print(good(f"\n✔ Saved and loaded: {name}  ({path})"))
+    if P.get("profile") == "record":
+        print(RECORD_TIPS)
+    elif P.get("profile") == "video":
+        print(VIDEO_TIPS)
     if sess.kept:
         print("Runs you kept: " + ", ".join(sess.kept))
     save_state(P, Session(sess.out, sess.stem, ver, name), base_file, raw, test_mode)  # --resume continues here

@@ -27,7 +27,7 @@ def _try(fn, word):
 
 
 def test_quit_everywhere():
-    for w in WORDS + ["3"]:
+    for w in WORDS + ["4"]:
         assert _try(menu, w) == "QUIT", w
     for w in WORDS:
         assert _try(lambda: term.pick("x", ["a", "b"], "a"), w) == "QUIT", w

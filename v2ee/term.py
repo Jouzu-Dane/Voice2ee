@@ -2,6 +2,73 @@
 import sys
 
 QUIT_WORDS = ("q", "quit", "exit")
+_CODES = {"green": "32", "red": "31", "yellow": "33", "cyan": "36", "bold": "1"}
+
+
+def colors_on():
+    """Colours: setting 'auto' (only in a terminal), 'on' or 'off'; NO_COLOR always turns them off."""
+    import os
+    if os.environ.get("NO_COLOR"):
+        return False
+    mode = os.environ.get("VOICE2EE_COLORS", "auto")
+    if mode == "off":
+        return False
+    if mode == "on":
+        return True
+    try:
+        return sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def color(text, name):
+    return f"\033[{_CODES[name]}m{text}\033[0m" if colors_on() else text
+
+
+def good(text):
+    """A confirmation that something works (green)."""
+    return color(text, "green")
+
+
+def bad(text):
+    """A failure or a problem (red)."""
+    return color(text, "red")
+
+
+def warn(text):
+    return color(text, "yellow")
+
+
+def install_tinted_print():
+    """Every line the tool prints that starts with '!!' / '✘' turns red, '✔' green (only when colours are on)."""
+    import builtins
+    if getattr(builtins.print, "_v2ee", False):
+        return
+    plain = builtins.print
+
+    def tinted(*a, sep=" ", end="\n", file=None, flush=False):
+        if (file is None or file is sys.stdout) and a and colors_on():
+            text = sep.join(str(x) for x in a)
+            body = text.lstrip("\r\n ")
+            head = body.split(":", 1)[1].lstrip() if body.startswith(("auto:", "you:")) else body
+            if head.startswith(("!!", "✘")):
+                text = bad(text)
+            elif head.startswith("✔"):
+                text = good(text)
+            return plain(text, end=end, file=file, flush=flush)
+        return plain(*a, sep=sep, end=end, file=file, flush=flush)
+    tinted._v2ee = True
+    builtins.print = tinted
+
+
+def tint(line):
+    """Colour a status line by its content: '!!' problems red, confirmations green."""
+    s = line.lstrip()
+    if s.startswith("!!") or s.startswith("✘"):
+        return bad(line)
+    if s.startswith("✔"):
+        return good(line)
+    return line
 
 
 class Quit(Exception):
