@@ -4,7 +4,7 @@ import numpy as np
 from .analysis import bmean
 from .config import (DEESS_FLOOR, HI_SPREAD, MAX_BANDS, MAX_UP_STEP, SAFETY_MARGIN, TARGET_LUFS, clip,
                      prof)
-from .eq import band_resid, glim, relayout, shift_range
+from .eq import band_resid, glim, relayout, relayout_imported, shift_range
 
 
 def target_lufs(P):
@@ -321,8 +321,20 @@ def manual_feedback(P, toks):
                 off("EQ/exciter")
         elif t in "+-":
             n = len(P["eq"]["bands"]) + 1
-            if P.get("imported"):
-                msgs.append("(changing the band count isn't available when tuning an existing preset)")
+            if P.get("imported") and m["eq"]:
+                regs = [b for b in P["eq"]["bands"] if not b.get("special")]
+                kept = len(P["eq"]["bands"]) - len(regs)
+                room = MAX_BANDS - 1 - kept - (1 if P["eq"].get("hpf_key") else 0)
+                new = int(clip(len(regs) + (4 if t == "+" else -4), 5, max(5, room)))   # 5 = the classic hand-picked set
+                if new == len(regs):
+                    msgs.append(f"EQ already at {'max' if t == '+' else 'min'} ({len(regs)} regular bands)")
+                else:
+                    n0, n1, err, nk = relayout_imported(P, new)
+                    msgs.append(f"EQ re-spread: {n0} -> {n1} regular bands"
+                                + (f", your {nk} narrow band{'s' if nk != 1 else ''} and filters kept as they were"
+                                   if nk else ", filters kept as they were")
+                                + f"; the new layout matches your curve within {err:.1f} dB"
+                                + (" (fewer bands can't follow every detail)" if t == "-" and err > 1.5 else ""))
             elif not m["eq"]:
                 off("EQ")
             else:

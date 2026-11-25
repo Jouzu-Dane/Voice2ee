@@ -196,10 +196,10 @@ def test_replay_rounds_end_to_end():
             loop.tune_loop(P, sess, measure, raw="alsa_input.podmic", test_mode="replay")
         txt = buf.getvalue()
         print("\n" + "\n".join(l for l in txt.splitlines() if l.startswith(("loudness", "EasyEffects", "  auto: loud",
-                                                                               "(EasyEffects confirmed", "Saved", "!!", "    "))))
+                                                                               "✔ EasyEffects confirmed", "✔ Saved", "!!", "    "))))
         assert "Replay didn't work" not in txt
         assert txt.count("loudness ") >= 2 and "EasyEffects adds" in txt
-        assert "(EasyEffects confirmed" in txt
+        assert "EasyEffects confirmed" in txt
         assert (tmp / "state" / "default_source").read_text().strip() == "alsa_input.podmic"   # real mic restored
         assert not (tmp / "state" / "loopback_up").exists()                                  # virtual mic removed
         assert any(l.startswith("load_preset:input:t_v") for l in fake.log)                  # loaded via socket
@@ -346,7 +346,8 @@ def test_ab_picks_through_easyeffects():
         ee.write_preset(P, "t_v1", tmp / "presets")
         sess = session.Session(tmp / "presets", "t", 1, "t_v1")
         take = {"speech": rd("speech_0.wav")[: 4 * 48000], "clicks": rd("clicks.wav")}
-        run = fit.make_ab_runner(take, "easyeffects_source", sess, st={"exact": (False, [])}, rounds=2)
+        run = fit.make_ab_runner(take, "easyeffects_source", sess, st={"exact": (False, [])}, rounds=2,
+                                 render_with="easyeffects")
         played, answers = [], iter(["a", "b"])
         real_play, real_ask = taste.play, fit.ask
         taste.play = lambda x: played.append(len(x))

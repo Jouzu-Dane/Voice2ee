@@ -7,7 +7,7 @@ from . import easyeffects as ee
 from .config import SAFETY_MARGIN, prof
 from .search import apply_overrides
 from .session import Session, next_version, save_state
-from .term import ask
+from .term import ask, good
 from .tuning import FEEDBACK_HELP, auto_adjust, manual_feedback, parse_feedback, region_summary, target_lufs
 
 
@@ -53,7 +53,7 @@ def apply(sess, name, first=False):
         for line in res["mismatch"][:8]:
             print("   ", line)
     elif first and res["checked"]:
-        print(f"(EasyEffects confirmed {res['checked']} settings, incl. every plugin's on/off state)")
+        print(good(f"✔ EasyEffects confirmed {res['checked']} settings, incl. every plugin's on/off state"))
 
 
 def _write_and_load(P, sess, name, base):
@@ -229,7 +229,7 @@ def finish(P, sess, base, base_file=None, raw=None, test_mode="live"):
     sess.current = name
     apply(sess, name)
     sess.cleanup()
-    print(f"\nSaved and loaded: {name}  ({path})")
+    print(good(f"\n✔ Saved and loaded: {name}  ({path})"))
     if P.get("profile") == "record":
         print(RECORD_TIPS)
     elif P.get("profile") == "video":

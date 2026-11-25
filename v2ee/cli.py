@@ -14,26 +14,27 @@ from .config import DEFAULT_MODULES, MAX_BANDS, PROFILES, TAKE_DIR, clip
 from .loop import tune_loop
 from .planner import finalize_mods, initial_params
 from .session import Session, clean_name, load_state, next_version, save_state, split_name
-from .term import Quit, ask, pick, restore_terminal_on_exit
+from .term import Quit, ask, good, install_tinted_print, pick, restore_terminal_on_exit
 
 
 def menu():
     print("""
-voice2ee - streaming voice preset builder for EasyEffects
+voice2ee - voice preset builder for EasyEffects
 
-  1) New       - pick modules, record your RAW mic, analyze and write a new preset (name_v1), then keep
-                 re-measuring through the EasyEffects mic and refining until you're happy
+  1) New       - pick a profile and modules, record your RAW mic, analyze and write a new preset (name_v1),
+                 then keep re-measuring through the EasyEffects mic and refining until you're happy
   2) Existing  - load one of your existing presets, test it as-is through the EasyEffects mic, and tune it
-  3) Quit
+  3) Settings  - defaults for everything: profile, Optimise, CPU cores, recordings, devices, colours, ...
+  4) Quit
 
   Versions: each tuning run that changes something is saved as name_v1-1, name_v1-2, ... (you choose which
   to keep); when you finish, the result becomes name_v2. q / quit / exit work at every prompt.
 """)
     while True:
-        s = ask("Choose [1/2/3]: ", quit_raises=False).lower()
-        if s in ("3", "q"):
+        s = ask("Choose [1/2/3/4]: ", quit_raises=False).lower()
+        if s in ("4", "q"):
             raise Quit()
-        if s in ("1", "2"):
+        if s in ("1", "2", "3"):
             return s
 
 
@@ -287,12 +288,18 @@ def main():
                    "recording (asked if not given)")
     g.add_argument("--goal", choices=list(fit.score.GOALS), help="what the optimiser prioritises (asked if not given)")
     g.add_argument("--trials", type=int, help="optimiser tries (default 300 exact / 200 approximate)")
-    g.add_argument("--jobs", type=int, help="CPU cores the optimiser may use (default: all but one, max 8)")
+    g.add_argument("--jobs", type=int, help="CPU cores the optimiser may use (default: 75%% of your cores)")
     g.add_argument("--finetune", choices=["keys", "ab", "both"], help="feedback keys, A/B picks, or both (asked)")
+    g.add_argument("--ab-render", choices=["auto", "easyeffects"], default="auto",
+                   help="A/B versions: instant (default) or replayed through EasyEffects")
     g.add_argument("--no-taste", action="store_true", help="don't start from your saved A/B taste")
     g.add_argument("--no-quality", action="store_true", help="don't use the quality model even if installed")
     g.add_argument("--check-full", action="store_true", help="show which Full-version parts are installed and work")
     args = ap.parse_args()
+    import copy
+    from . import settings
+    typed = copy.copy(args)                       # what you typed, before saved settings fill in the rest
+    settings.apply(args, ap)
 
     if args.check_full:
         fit.print_full_status(fit.full_status())
@@ -348,12 +355,17 @@ def main():
             print("(No saved recording to replay - using live mode.)")
             mode = "live"
         ee_src = choose_ee()
-        ab = fit.make_ab_runner(take if take is not None else load_take(TAKE_DIR), ee_src, sess, base)
+        ab = fit.make_ab_runner(take if take is not None else load_take(TAKE_DIR), ee_src, sess, base,
+                                st=_exact_status(args), render_with=args.ab_render)
         tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=base, base_file=bf, raw=raw,
                   test_mode=mode, ab=ab)
         return
 
     choice = args.mode or menu()
+    while choice == "3":
+        settings.menu()
+        vars(args).update(vars(settings.apply(copy.copy(typed), ap)))
+        choice = menu()
 
     if choice == "2":
         src = pick_preset(args, out)
@@ -386,7 +398,7 @@ Record your raw (unprocessed) voice once?
         save_state(P, sess, str(src), raw, mode)
         ab, start_ab = None, False
         if take is not None:
-            ab = fit.make_ab_runner(take, ee_src, sess, base, st=_exact_status(args))
+            ab = fit.make_ab_runner(take, ee_src, sess, base, st=_exact_status(args), render_with=args.ab_render)
             start_ab = fit.choose_finetune(args) in ("ab", "both")
         final = tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=base,
                           base_file=str(src), raw=raw, test_mode=mode, ab=ab, start_ab=start_ab)
@@ -432,7 +444,7 @@ Record your raw (unprocessed) voice once?
     path = ee.write_preset(P, name0, out, args.base)
     sess = Session(out, stem, ver, name0)
     save_state(P, sess, raw=raw, mode=mode)
-    print(f"\nSaved: {path}")
+    print(good(f"\n✔ Saved: {path}"))
     print("\nNext, tuning measures the sound AFTER EasyEffects, so the preset gets loaded there.")
     if ee_src is None:
         try:
@@ -441,7 +453,7 @@ Record your raw (unprocessed) voice once?
             print(f"\n'{name0}' is saved. Continue tuning later with:  ./voice2ee.py --resume")
             return
     start_ab = fit.choose_finetune(args) in ("ab", "both")
-    ab = fit.make_ab_runner(take, ee_src, sess, args.base, st=st)
+    ab = fit.make_ab_runner(take, ee_src, sess, args.base, st=st, render_with=args.ab_render)
     tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=args.base, raw=raw, test_mode=mode,
               ab=ab, start_ab=start_ab)
     print("Resume later with:  ./voice2ee.py --resume")
@@ -469,6 +481,7 @@ def import_preset_with_args(base, args, profile="stream"):
 
 def run():
     restore_terminal_on_exit()
+    install_tinted_print()
     try:
         main()
     except Quit:

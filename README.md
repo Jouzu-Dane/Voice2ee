@@ -39,8 +39,10 @@ sounds right.
 - [Optimise and A/B picks](#optimise-and-ab-picks)
 - [Feedback keys](#feedback-keys)
 - [Locks and ranges](#locks-and-ranges)
+- [Settings](#settings)
 - [Command-line options](#command-line-options)
 - [Files and locations](#files-and-locations)
+- [Privacy and your recordings](#privacy-and-your-recordings)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 - [Known limitations](#known-limitations)
@@ -100,8 +102,19 @@ The installer:
 | `./install.sh --no-deps` | Install the tool without touching system packages |
 | `./install.sh --venv` | Get numpy and scipy from pip in a private virtualenv |
 | `./install.sh --yes` | Don't ask before installing packages |
-| `./install.sh --uninstall` | Remove voice2ee, incl. the Full version's virtualenv and model (your presets, recording, taste and locks are kept) |
+| `./install.sh --uninstall` | Remove voice2ee, incl. the Full version's virtualenv and model, and offer to remove system packages it installed that nothing else needs (your presets, recording, taste and locks are kept) |
 | `PREFIX=/opt/voice2ee ./install.sh` | Install somewhere else |
+
+**Uninstalling.** The installer remembers which system packages *it* installed (only ones you didn't have
+before). `--uninstall` checks each of them with your package manager:
+
+- needed by another installed package (e.g. the LSP plugins by EasyEffects): kept
+- only voice2ee needed it (e.g. `python-lilv`, `calf`): offered for removal, default yes
+- nothing depends on it, but you may use it yourself (EasyEffects, PipeWire tools, ffmpeg, DeepFilterNet,
+  Python/numpy/scipy): asked separately, default no, and never removed with `--yes`
+
+On distros where the dependency check isn't available, packages are kept and listed. Your presets, recording,
+taste and locks are always kept.
 
 **Without installing**, you can run it straight from the clone:
 
@@ -117,7 +130,7 @@ Both versions have every feature. The Full version does the heavy parts better.
 |---|---|---|
 | Needs | Python, numpy, scipy, PipeWire tools | + lilv and the LSP/Calf LV2 plugins (usually already there with a native EasyEffects), onnxruntime (~60 MB, from pip into voice2ee's own virtualenv), the DNSMOS model (a few MB) |
 | Optimise | searches with a built-in **approximate** model of the plugins; the first round through EasyEffects confirms and corrects it | runs your **real** plugins offline: what it picks is what you hear |
-| A/B picks | rendered through EasyEffects: about 20 s to prepare each pick | instant |
+| A/B picks | instant, made with the built-in model | instant, made with your real plugins |
 | Quality score | – | DNSMOS, a model trained on human listening ratings, helps choose between candidates |
 | Download | nothing extra | needs internet once |
 
@@ -138,14 +151,16 @@ parts are installed and runs your plugins once in a separate process, so a broke
 2. Run **`voice2ee`** and choose:
 
 ```
-  1) New       - pick modules, record your RAW mic, analyze and write a new preset (name_v1), then keep
-                 re-measuring through the EasyEffects mic and refining until you're happy
+  1) New       - pick a profile and modules, record your RAW mic, analyze and write a new preset (name_v1),
+                 then keep re-measuring through the EasyEffects mic and refining until you're happy
   2) Existing  - load one of your existing presets, test it as-is through the EasyEffects mic, and tune it
-  3) Quit
+  3) Settings  - defaults for everything: profile, Optimise, CPU cores, recordings, devices, colours, ...
+  4) Quit
 ```
 
-   After choosing New or Existing, pick the **profile** (Stream or Record) and, for a new preset, tick the modules
-   you want. The ticked defaults are the recommended setup for that profile.
+   After choosing New or Existing, pick the **profile** (Stream, Video or Record) and, for a new preset, tick the
+   modules you want. The ticked defaults are the recommended setup for that profile. Anything you set in
+   **Settings** is used instead of asking.
 3. Each round, voice2ee shows what it measured, makes automatic adjustments, and asks what you hear (see
    [Feedback keys](#feedback-keys)). Type `q`, `quit` or `exit` when you're happy. The result is saved as the next
    version and loaded into EasyEffects.
@@ -404,7 +419,7 @@ The scorecard:
 | Hard limits | peaks over the ceiling, true peaks over -1 dBTP (Video) or more gain than allowed reject a try outright |
 
 The search is a small evolution strategy: it tries variations around the best so far, searches wider while it
-keeps improving and narrower when it doesn't. It uses all your CPU cores but one (`--jobs` to
+keeps improving and narrower when it doesn't. It uses 75 % of your CPU cores (`--jobs` or Settings to
 change): each step of the search tries one variation per core at the same time. Typical run: 200 tries with the
 approximate model, well under a minute on an 8-core CPU (about 2 minutes on one core); 300 with the real plugins,
 a few minutes. Press **Ctrl+C** to stop early: the best result so far is kept. A final step fine-tunes the
@@ -413,7 +428,8 @@ EasyEffects. RNNoise and the Deep noise remover can't run offline, so they're ju
 
 ### A/B picks (step 3)
 
-You hear version A, then version B: same sentence, same loudness, random order. Press `a` or `b` for the better
+You hear version A, then version B: the same short clip (about 5 s of your free talk, 4 s of the test sentences
+and a moment of keyboard noise), same loudness, random order. Press `a` or `b` for the better
 one (`s` = can't tell, `x` = both bad, `r` = play again, `q` = stop). Each pair differs along up to five
 **taste directions**:
 
@@ -428,6 +444,15 @@ one (`s` = can't tell, `x` = both bad, `r` = play again, `q` = stop). Each pair 
 A Bayesian preference model estimates where your taste sits and places the next pair where it's still least sure,
 so about 12 picks are enough. The result moves the preset and is **saved** (`~/.config/voice2ee/taste.json`):
 new presets start from it and Optimise aims for it. Use `--no-taste` to ignore it.
+
+Each pair differs in **one** direction at a time, clearly at first (about 6 dB of EQ, for example) and finer
+as it learns, so every pick is an easy call.
+
+The versions are made **instantly**: with your real plugins offline in the Full version, or with the built-in
+model in the Minimal version. What matters for a pick is the difference between A and B, which the built-in model
+gets right; the result is applied to the real preset and checked through EasyEffects afterwards. If you prefer
+every version to come from EasyEffects itself, set *A/B versions made with* to `easyeffects` in Settings (or
+`--ab-render easyeffects`); each pick then takes about 20 s to prepare.
 
 Choose A/B picks at the start of fine-tuning, or press `a` in any round.
 
@@ -449,7 +474,7 @@ After each round, type one or more keys (e.g. `b c`), or the word in brackets:
 | `p` | plosives / pops | high-pass up |
 | `m` | mouth clicks / lip smacks | stronger de-esser, faster gate release |
 | `k` | desk knocks / taps | tap catcher: lower threshold, higher ratio, wider band |
-| `+` / `-` | more / fewer EQ bands | re-spaces the EQ (New mode only) |
+| `+` / `-` | more / fewer EQ bands | re-spaces the EQ. On an existing preset the new bands are fitted to reproduce your curve, and narrow bands (notches), filters and the high-pass stay exactly as you made them |
 | `a` | A/B picks | about 12 picks between two versions; learns and saves your taste |
 | *Enter* | measure again | |
 | `q` `quit` `exit` | happy: save and finish | |
@@ -477,6 +502,27 @@ A/B picks. Common paths: `limiter`, `gate.thr`, `gate.release`, `gate.ratio`, `f
 `taps.thr`, `taps.ratio`, `eq.hpf`, `comp.thr`, `comp.ratio`, `comp.makeup`, `comp.release`, `comp2.thr`,
 `comp2.ratio`, `deess.thr`, `deess.ratio`, `deess2.thr`, `deess2.ratio`, `exciter.amount`, `exciter.scope`.
 
+## Settings
+
+Choose **3) Settings** on the first screen to set defaults for everything, so voice2ee stops asking about things
+you always answer the same way:
+
+| Setting | Default |
+|---|---|
+| Profile, how to fit the first preset, Optimise goal, fine-tune method, tuning rounds | ask each time |
+| Optimise tries | automatic (300 exact / 200 approximate) |
+| A/B versions made with | auto (instant) |
+| CPU cores for Optimise | 75 % of your cores |
+| Speech recording | hybrid (free talk + test sentences); free-talk and sentence lengths |
+| Keyboard/mouse and desk-knock recordings | on |
+| EQ bands, gain cap, loudness target | 10, profile default, profile default |
+| Start from my saved A/B taste, use the quality model | on |
+| Raw mic, EasyEffects mic | ask / `easyeffects_source` |
+| Colours | auto (green = working, red = problem; `NO_COLOR` turns them off) |
+
+Settings are saved in `~/.config/voice2ee/settings.json`. Options typed on the command line still win for that
+run. `r` in the settings screen resets everything.
+
 ## Command-line options
 
 | Option | Default | Description |
@@ -503,8 +549,9 @@ A/B picks. Common paths: `limiter`, `gate.thr`, `gate.release`, `gate.ratio`, `f
 | `--engine {quick,optimise}` | asked | (mode 1) how the first preset is fitted |
 | `--goal NAME` | asked | Optimise goal: `balanced`, `keyboard`, `natural`, `broadcast`, `clarity` |
 | `--trials N` | 300 / 200 | Optimise tries (real plugins / approximate model) |
-| `--jobs N` | cores − 1 (max 8) | CPU cores Optimise may use |
+| `--jobs N` | 75 % of your cores | CPU cores Optimise may use |
 | `--finetune {keys,ab,both}` | asked | feedback keys, A/B picks first, or both |
+| `--ab-render {auto,easyeffects}` | auto | A/B versions made instantly, or replayed through EasyEffects |
 | `--no-taste` | | don't start from your saved taste |
 | `--no-quality` | | don't use the quality model even if installed |
 | `--check-full` | | show which Full-version parts are installed and work |
@@ -523,8 +570,65 @@ Fine-tuning options: `--box-cut`, `--makeup`, `--gate-offset`, `--no-vad`, `--va
 | `~/.cache/voice2ee/take/` | the recording used by record-once mode |
 | `~/.cache/voice2ee/state.json` | the session, for `--resume` |
 | `~/.local/share/voice2ee/` | the installed tool (Full: also `venv/` and `models/`) |
+| `~/.config/voice2ee/settings.json` | your settings (first screen, option 3) |
 | `~/.config/voice2ee/taste.json` | your taste from A/B picks |
 | `~/.config/voice2ee/overrides.toml` | your locks and ranges (optional) |
+
+## Privacy and your recordings
+
+voice2ee records your voice, so here is exactly what happens with it.
+
+**Everything stays on your computer.** voice2ee has no telemetry, no analytics, no accounts and no uploads. While
+it runs it makes no internet connections at all: the analysis, Optimise, A/B picks, the offline plugins and the
+DNSMOS quality model all run locally. The only programs it talks to are on your own machine: PipeWire (to record
+and play), and EasyEffects through its local control socket (to load presets and read their settings back).
+
+**When it records.** Only during the steps it announces with a countdown: room tone, your speech (free talk and
+the test sentences), keyboard/mouse noise and desk knocks, and the measuring rounds. It never listens in the
+background, and nothing you type during a recording is kept or shown.
+
+**What's saved, and where:**
+
+| File | What it contains | Kept until |
+|---|---|---|
+| `~/.cache/voice2ee/take/speech.wav` | your raw speech recording (free talk + test sentences) | your next recording replaces it, or you delete it |
+| `~/.cache/voice2ee/take/noise.wav`, `clicks.wav`, `taps.wav` | room tone, keyboard/mouse noise, desk knocks | as above |
+| `~/.cache/voice2ee/take/meta.json` | where the free talk ends and the sentences begin (a number, no audio) | as above |
+| `~/.cache/voice2ee/replay_tmp.wav` | the last piece of your recording that was replayed through EasyEffects | the next replay overwrites it |
+| `~/.cache/voice2ee/ab_play.wav` | the last A/B clip that was played (about 11 s of your voice) | the next A/B pick overwrites it |
+| `~/.cache/voice2ee/last.json` | measurements of your voice: levels, spectrum, timing (numbers, no audio) | the next analysis |
+| `~/.cache/voice2ee/state.json` | the preset settings and device names, for `--resume` (no audio) | the next session |
+| `~/.config/voice2ee/` | your settings, saved A/B taste and locks (no audio) | you delete them |
+| EasyEffects preset folder | the presets voice2ee writes (settings only, no audio) | you delete them |
+
+Recordings made in **live** rounds (talking again every round) are analysed in memory and never written to disk.
+The processed audio recorded from EasyEffects in record-once rounds is also kept in memory only.
+
+The free-talk part is whatever you say, so it's stored as you said it. Keep that in mind, and don't say anything
+you wouldn't want saved in a file on your computer.
+
+**Who can hear it.** During a record-once replay (about 30 s per round), a temporary microphone called
+`voice2ee-replay-mic` is your system's default input. Any app listening to the default microphone at that moment,
+for example OBS or Discord, hears your replayed recording. Your real microphone is restored right after. A/B
+picks play through your normal speakers or headphones.
+
+**Deleting it.** `./install.sh --uninstall` removes the tool but deliberately keeps your recording, settings and
+presets. To delete your recordings and everything else voice2ee stored:
+
+```bash
+rm -rf ~/.cache/voice2ee      # recordings, temporary audio, measurements, session
+rm -rf ~/.config/voice2ee     # settings, saved taste, locks
+```
+
+Your presets live in the EasyEffects preset folder (see [Files and locations](#files-and-locations)); delete the
+ones you don't want from there or in EasyEffects.
+
+**The installer** is the only part that uses the internet, and only for what you agree to: your distro's package
+manager (its usual servers), pip for onnxruntime (PyPI) and the DNSMOS model (downloaded from Microsoft's
+DNS-Challenge repository on GitHub) in the Full version. Those servers see a normal download request from your IP
+address, as with any download. No recordings or measurements are ever sent.
+
+**The test suite** uses only synthetic speech generated with ffmpeg's flite voices, never your recordings.
 
 ## Troubleshooting
 

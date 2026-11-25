@@ -9,7 +9,7 @@
 #   ./install.sh --no-deps    install voice2ee without touching system packages
 #   ./install.sh --venv       put numpy/scipy in a private virtualenv (if your distro's packages are missing/old)
 #   ./install.sh --yes        don't ask before installing packages
-#   ./install.sh --uninstall  remove voice2ee (your presets and recordings are kept)
+#   ./install.sh --uninstall  remove voice2ee; offers to remove system packages it installed that nothing else needs
 #
 # Env: PREFIX (default ~/.local)  ->  files in $PREFIX/share/voice2ee, command in $PREFIX/bin/voice2ee
 set -euo pipefail
@@ -42,14 +42,7 @@ bad()  { printf '  %s✘%s %s\n' "$R" "$N" "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ------------------------------------------------------------------------------------------------ uninstall
-if [ "$UNINSTALL" = 1 ]; then
-  rm -rf "$APP_DIR" "$BIN_DIR/voice2ee"
-  echo "Removed $APP_DIR (incl. the Full version's virtualenv and model) and $BIN_DIR/voice2ee."
-  echo "Kept: your EasyEffects presets (~/.local/share/easyeffects/input), your recording (~/.cache/voice2ee)"
-  echo "      and your taste/locks (~/.config/voice2ee) - delete those folders if you like."
-  echo "System packages installed with your package manager (e.g. lilv, LV2 plugins) were left in place."
-  exit 0
-fi
+# (--uninstall runs further down, once the distro and its package names are known)
 
 # ------------------------------------------------------------------------------------------------ distro
 ID="" ID_LIKE="" PRETTY_NAME="Linux"
@@ -110,6 +103,116 @@ case "$FAMILY" in
 esac
 DNSMOS_URL="https://github.com/microsoft/DNS-Challenge/raw/master/DNSMOS/DNSMOS/sig_bak_ovr.onnx"
 MODEL="$APP_DIR/models/sig_bak_ovr.onnx"
+RECORD="$APP_DIR/installed-packages.txt"      # packages this installer installed (and nobody had before)
+
+# ------------------------------------------------------------------------------------------------ packages
+# pkg_installed NAME: 0 = installed, 1 = not installed, 2 = can't tell on this distro
+pkg_installed() {
+  case "$PM" in
+    pacman) pacman -Q "$1" >/dev/null 2>&1 ;;
+    apt)    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed" ;;
+    dnf|zypper) rpm -q "$1" >/dev/null 2>&1 ;;
+    xbps)   xbps-query "$1" >/dev/null 2>&1 ;;
+    apk)    apk info -e "$1" >/dev/null 2>&1 ;;
+    *)      return 2 ;;
+  esac
+}
+# needed_by NAME: prints the installed packages that depend on NAME ("" = nothing, "?" = can't tell)
+needed_by() {
+  set +o pipefail
+  case "$PM" in
+    pacman) pacman -Qi "$1" 2>/dev/null | awk '
+              /^Required By/ {on=1; sub(/^Required By *: */, ""); print; next}
+              on && /^[^ ]/  {exit}
+              on             {sub(/^ +/, ""); print}' | tr -s ' \n' ' ' | sed 's/^None *$//; s/ *$//' ;;
+    apt)    apt-cache rdepends --installed --no-recommends --no-suggests --no-conflicts --no-breaks \
+              --no-replaces --no-enhances "$1" 2>/dev/null | tail -n +3 | sed 's/^[ |]*//' | sort -u | tr '\n' ' ' |
+              sed 's/ *$//' ;;
+    dnf)    dnf repoquery --installed --whatrequires "$1" -q 2>/dev/null | tr '\n' ' ' | sed 's/ *$//' ;;
+    zypper) rpm -q --whatrequires "$1" 2>/dev/null | grep -v "no package requires" | tr '\n' ' ' | sed 's/ *$//' ;;
+    xbps)   xbps-query -X "$1" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//' ;;
+    *)      echo "?" ;;
+  esac
+  set -o pipefail
+}
+case "$PM" in
+  pacman) REMOVE=(sudo pacman -Rs) ;;
+  apt)    REMOVE=(sudo apt-get remove -y) ;;
+  dnf)    REMOVE=(sudo dnf remove -y) ;;
+  zypper) REMOVE=(sudo zypper remove -y) ;;
+  xbps)   REMOVE=(sudo xbps-remove -R) ;;
+  apk)    REMOVE=(sudo apk del) ;;
+  *)      REMOVE=() ;;
+esac
+# packages you may well use yourself, outside voice2ee: offered separately, default "no"
+is_shared() {
+  case "$1" in
+    "${PKG[0]}"|"${PKG[1]}"|"${PKG[2]}"|"${PKG[3]}"|"${PKG[4]}"|"${PKG[5]}"|"${PKG[6]}"|deepfilternet-ladspa) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+ask_default_no() {
+  [ "$ASSUME_YES" = 1 ] && return 1                  # --yes never removes shared packages
+  local a; read -r -p "$1 [y/N] " a || true
+  case "${a,,}" in y|yes) return 0 ;; *) return 1 ;; esac
+}
+ask_default_yes() {
+  [ "$ASSUME_YES" = 1 ] && return 0
+  local a; read -r -p "$1 [Y/n] " a || true
+  case "${a,,}" in ""|y|yes) return 0 ;; *) return 1 ;; esac
+}
+
+# ------------------------------------------------------------------------------------------------ uninstall
+if [ "$UNINSTALL" = 1 ]; then
+  RECORDED=()
+  if [ -f "$RECORD" ]; then mapfile -t RECORDED < <(grep -v '^[[:space:]]*$' "$RECORD" | sort -u || true); fi
+  rm -rf "$APP_DIR" "$BIN_DIR/voice2ee"
+  echo "Removed $APP_DIR (incl. the Full version's virtualenv and model) and $BIN_DIR/voice2ee."
+  echo "Kept: your EasyEffects presets (~/.local/share/easyeffects/input), your recording (~/.cache/voice2ee)"
+  echo "      and your taste/locks (~/.config/voice2ee) - delete those folders if you like."
+  echo
+  OWN=() SHARED=() KEEP=()
+  if [ ${#RECORDED[@]} -eq 0 ]; then
+    echo "No record of system packages installed by voice2ee (none were, or they were installed by an older"
+    echo "version of this installer). Nothing else to remove."
+    for p in "${FULL_PKG[@]}"; do              # older installs: at least point at the Full extras
+      if pkg_installed "$p" && [ -z "$(needed_by "$p" || true)" ]; then KEEP+=("$p"); fi
+    done
+    if [ ${#KEEP[@]} -gt 0 ] && [ ${#REMOVE[@]} -gt 0 ]; then
+      echo "If an older voice2ee installed the Full extras and nothing else needs them, you can remove them with:"
+      echo "  ${REMOVE[*]} ${KEEP[*]}"
+    fi
+    exit 0
+  fi
+  echo "${B}System packages voice2ee installed:${N}"
+  for p in "${RECORDED[@]}"; do
+    st=0; pkg_installed "$p" || st=$?
+    if [ "$st" = 1 ]; then printf '  %-24s already removed\n' "$p"; continue; fi
+    users="$(needed_by "$p" || true)"
+    if [ "$users" = "?" ]; then printf '  %-24s %s\n' "$p" "can't check what else uses it here - kept"; KEEP+=("$p")
+    elif [ -n "$users" ]; then printf '  %-24s %s\n' "$p" "kept - needed by: $users"; KEEP+=("$p")
+    elif is_shared "$p"; then printf '  %-24s %s\n' "$p" "not needed by other packages, but you may use it yourself"; SHARED+=("$p")
+    else printf '  %-24s %s\n' "$p" "only voice2ee needed it"; OWN+=("$p"); fi
+  done
+  TO_REMOVE=()
+  if [ ${#OWN[@]} -gt 0 ] && ask_default_yes "Remove the packages only voice2ee needed (${OWN[*]})?"; then
+    TO_REMOVE+=("${OWN[@]}")
+  fi
+  if [ ${#SHARED[@]} -gt 0 ]; then
+    echo "  ${SHARED[*]}: nothing else depends on them, but they're things like EasyEffects or ffmpeg you may use."
+    if ask_default_no "Remove them too?"; then TO_REMOVE+=("${SHARED[@]}"); fi
+  fi
+  if [ ${#TO_REMOVE[@]} -gt 0 ]; then
+    if [ ${#REMOVE[@]} -gt 0 ]; then
+      "${REMOVE[@]}" "${TO_REMOVE[@]}" || warn "The package manager reported a problem - check the output above."
+    else
+      echo "Remove them with your package manager: ${TO_REMOVE[*]}"
+    fi
+  else
+    echo "System packages left in place."
+  fi
+  exit 0
+fi
 
 echo "${B}voice2ee installer${N}  -  $PRETTY_NAME${FAMILY:+ ($FAMILY family, $PM)}"
 echo
@@ -124,7 +227,8 @@ ${B}Which version do you want?${N}
      ${G}+${N} Small and simple: fewest parts that can break, nothing extra to keep updated
      ${Y}-${N} Optimise searches with a built-in ${B}approximate${N} model of the plugins. The first round
        through EasyEffects confirms and corrects it, but the search itself is less precise
-     ${Y}-${N} A/B picks are rendered through EasyEffects: about 20 s to prepare each pick
+     ${Y}-${N} A/B versions come from the same built-in model (instant; your pick is then checked
+       through EasyEffects)
      ${B}Choose it if:${N} you use the EasyEffects Flatpak, want it light and quick, have an older or
        slower PC, or simply want a good preset without extras. You can upgrade later.
 
@@ -132,7 +236,7 @@ ${B}Which version do you want?${N}
      EasyEffects), onnxruntime in a private virtualenv (about 60 MB) and Microsoft's DNSMOS
      speech-quality model (a few MB). Needs internet for the download.
      ${G}+${N} Optimise runs your ${B}real${N} EasyEffects plugins offline: what it picks is what you hear
-     ${G}+${N} Instant A/B picks
+     ${G}+${N} A/B versions made with your real plugins (instant)
      ${G}+${N} A quality score trained on human listening ratings helps choose between candidates
      ${Y}-${N} Bigger, more parts; onnxruntime comes from pip, not your distro
      ${Y}-${N} Optimising takes a few minutes per preset
@@ -321,7 +425,12 @@ if [ "$NO_DEPS" = 0 ] && [ $(( ${#MISSING_REQ[@]} + ${#MISSING_OPT[@]} )) -gt 0 
     echo "${B}These packages are missing:${N}"
     for p in "${TO_INSTALL[@]}"; do printf '  %-24s %s\n' "$p" "$(reason_for "$p")"; done
     if confirm "Install them now with: ${INSTALL[*]} ...?"; then
+      BEFORE=()
+      for p in "${TO_INSTALL[@]}"; do st=0; pkg_installed "$p" || st=$?; [ "$st" = 1 ] && BEFORE+=("$p"); done
       "${INSTALL[@]}" "${TO_INSTALL[@]}" || warn "The package manager reported a problem - check the output above."
+      for p in "${BEFORE[@]}"; do                 # remember only what this run actually added
+        if pkg_installed "$p"; then mkdir -p "$APP_DIR"; echo "$p" >> "$RECORD"; fi
+      done
     else
       warn "Skipped. Install them yourself, then run ./install.sh again."
     fi
@@ -341,7 +450,7 @@ if [ -z "$PY" ]; then bad "Python 3.9+ is still missing - can't install voice2ee
 # ------------------------------------------------------------------------------------------------ install tool
 echo "${B}Installing voice2ee${N} to $APP_DIR"
 mkdir -p "$APP_DIR" "$BIN_DIR"
-rm -rf "$APP_DIR/v2ee"
+rm -rf "$APP_DIR/v2ee"                          # (keeps installed-packages.txt, venv, models)
 cp -r "$SRC_DIR/v2ee" "$APP_DIR/"
 cp "$SRC_DIR/voice2ee.py" "$SRC_DIR/README.md" "$APP_DIR/"
 find "$APP_DIR" -name '__pycache__' -prune -exec rm -rf {} +
@@ -431,4 +540,5 @@ if [ "$EDITION" = full ]; then
   fi
 fi
 echo
-echo "Done (${EDITION:-minimal} version${STATUS}). Start EasyEffects, then run:  ${B}voice2ee${N}   (voice2ee --help for options)"
+if [ -z "$STATUS" ] || [ "$STATUS" = " - all parts working" ]; then DC="$G"; MARK="✔"; else DC="$Y"; MARK="!"; fi
+echo "${DC}${MARK} Done (${EDITION:-minimal} version${STATUS}).${N} Start EasyEffects, then run:  ${B}voice2ee${N}   (voice2ee --help for options)"

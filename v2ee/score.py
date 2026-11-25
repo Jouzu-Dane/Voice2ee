@@ -71,9 +71,10 @@ def taste_tone_shift(centers, taste):
     if not taste:
         return np.zeros(len(centers))
     c = np.asarray(centers)
-    return (2.5 * taste.get("warm", 0) * ((c >= 120) & (c <= 400)) +
-            2.5 * taste.get("bright", 0) * ((c >= 2000) & (c <= 6000)) +
-            2.5 * taste.get("air", 0) * (c >= 7000))
+    from .taste import STEP_DB
+    return (STEP_DB * taste.get("warm", 0) * ((c >= 120) & (c <= 400)) +
+            STEP_DB * taste.get("bright", 0) * ((c >= 2000) & (c <= 6000)) +
+            STEP_DB * taste.get("air", 0) * (c >= 7000))
 
 
 def scorecard(proc, P, goal="balanced", quality=None, taste=None):

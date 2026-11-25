@@ -23,6 +23,7 @@ DIMS = {
     "air":    "air (top end above 7 kHz)",
 }
 SENS = 3.0                                    # how reliably a difference of 1 in 'distance to your taste' shows
+STEP_DB = 4.0                                 # EQ change (dB) for a full step (1.0) along a tone direction
 
 
 def dims_for(P):
@@ -47,22 +48,22 @@ def apply_taste(P, t):
     if m.get("eq"):
         for bd in P["eq"]["bands"]:
             f, g = bd["f"], bd["g"]
-            g += 2.5 * t.get("warm", 0) * (120 <= f < 400)
-            g += 2.5 * t.get("bright", 0) * (2000 <= f < 6000)
-            g += 2.5 * t.get("air", 0) * (f >= 7000)
+            g += STEP_DB * t.get("warm", 0) * (120 <= f < 400)
+            g += STEP_DB * t.get("bright", 0) * (2000 <= f < 6000)
+            g += STEP_DB * t.get("air", 0) * (f >= 7000)
             bd["g"] = round(clip(g, *glim(f)), 2)
     if m.get("exciter") and "air" in t:
         P["exciter"]["amount"] = round(clip(P["exciter"]["amount"] + t["air"], 0, 6), 2)
     if m.get("comp") and "polish" in t:
         x = t["polish"]
-        P["comp"]["ratio"] = round(clip(P["comp"]["ratio"] * (1 + 0.35 * x), 1.1, 6), 2)
-        P["comp"]["thr"] = round(P["comp"]["thr"] - 3 * x, 1)
+        P["comp"]["ratio"] = round(clip(P["comp"]["ratio"] * (1 + 0.5 * x), 1.1, 6), 2)
+        P["comp"]["thr"] = round(P["comp"]["thr"] - 4 * x, 1)
         if m.get("comp2"):
             P["comp2"]["ratio"] = round(clip(P["comp2"]["ratio"] * (1 + 0.3 * x), 1.2, 8), 2)
     if "clean" in t:
         x = t["clean"]
         if m.get("noise"):
-            P["gate"]["thr"] = round(min(P["gate"]["thr"] + 3 * x, -10), 1)
+            P["gate"]["thr"] = round(min(P["gate"]["thr"] + 5 * x, -10), 1)
             if m["noise"] in ("expander", "both"):
                 P["gate"]["ratio"] = round(clip(P["gate"]["ratio"] * (1 + 0.25 * x), 1.2, 6), 2)
         if m.get("deep") and P.get("deep"):
@@ -81,9 +82,12 @@ class Learner:
         self.data = []                         # (tA, tB, y, weight)
 
     def next_pair(self, rng):
-        lam, vec = np.linalg.eigh(self.cov)
-        v = vec[:, -1]
-        delta = float(np.clip(1.5 * np.sqrt(lam[-1]), 0.2, 0.7))
+        """One taste direction at a time (the one it's least sure about), so each pick compares one clear
+        difference - big at first, finer as it learns."""
+        i = int(np.argmax(np.diag(self.cov)))
+        v = np.zeros(self.d)
+        v[i] = 1.0
+        delta = float(np.clip(1.5 * np.sqrt(self.cov[i, i]), 0.35, 0.8))
         a, b = np.clip(self.mu + delta * v, -1, 1), np.clip(self.mu - delta * v, -1, 1)
         return (a, b) if rng.random() < 0.5 else (b, a)
 
@@ -177,20 +181,32 @@ def play(x):
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=len(x) / SR + 10)
 
 
-def listening_clip(take, secs=7.0):
-    """The most active stretch of your speech (+ a little keyboard noise, so 'clean' can be judged)."""
+def _most_active(x, secs):
     from .analysis import frames_of, rms_db
+    n = int(secs * SR)
+    if len(x) <= n:
+        return x
+    lv = rms_db(frames_of(x, SR // 2))
+    k = max(1, int(secs * 2))
+    best = int(np.argmax(np.convolve(lv, np.ones(k), "valid")))
+    return x[best * SR // 2: best * SR // 2 + n]
+
+
+def listening_clip(take, free_secs=5.0, read_secs=4.0):
+    """What each A/B pick plays: ~5 s of your free talk, ~4 s of the test sentences (the "s" and "p" sounds show
+    brightness and air best) and 1.5 s of keyboard noise (so cleanliness can be judged)."""
     sp = np.asarray(take["speech"], np.float32)
     sp = sp.mean(axis=1) if sp.ndim == 2 else sp
-    n = int(secs * SR)
-    if len(sp) > n:
-        lv = rms_db(frames_of(sp, SR // 2))
-        k = int(secs * 2)
-        best = int(np.argmax(np.convolve(lv, np.ones(k), "valid")))
-        sp = sp[best * SR // 2: best * SR // 2 + n]
-    parts = [sp]
+    split = take.get("speech_split")
+    if not split or not 0 < split < len(sp):              # no marker (older recording): last quarter = sentences
+        split = int(len(sp) * 0.75)
+    parts = [_most_active(sp[:split], free_secs)]
+    if len(sp) - split > SR:
+        gap = np.zeros(int(0.25 * SR), np.float32)
+        parts += [gap, _most_active(sp[split:], read_secs)]
     if take.get("clicks") is not None:
         c = np.asarray(take["clicks"], np.float32)
+        parts.append(np.zeros(int(0.25 * SR), np.float32))
         parts.append((c.mean(axis=1) if c.ndim == 2 else c)[: int(1.5 * SR)])
     return np.concatenate(parts)
 

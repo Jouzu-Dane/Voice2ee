@@ -91,3 +91,34 @@ def test_rnnoise_is_the_default_everywhere():
             assert DEFAULT_MODULES[prof]["rnnoise"] is True
     finally:
         ee.deep_available = real
+
+
+def test_ab_clip_has_free_talk_and_sentences():
+    from v2ee import taste
+    free = np.sin(np.arange(20 * SR) / 30.0).astype(np.float32) * 0.3       # stand-in for free talk
+    read = np.sin(np.arange(8 * SR) / 7.0).astype(np.float32) * 0.3          # stand-in for the sentences
+    take = {"speech": np.concatenate([free, read]), "speech_split": len(free), "clicks": np.full(3 * SR, 0.01)}
+    clip = taste.listening_clip(take)
+    assert len(clip) == 5 * SR + SR // 4 + 4 * SR + SR // 4 + int(1.5 * SR)
+    assert np.allclose(clip[5 * SR + SR // 4: 5 * SR + SR // 4 + 100], read[:100]) or \
+        any(np.allclose(clip[5 * SR + SR // 4: 5 * SR + SR // 4 + 100], read[k:k + 100]) for k in range(0, 4 * SR, SR // 2))
+    with_old = dict(take, speech_split=None)                                   # older recording: last quarter
+    assert len(taste.listening_clip(with_old)) > 9 * SR
+
+
+def test_take_remembers_where_the_sentences_start():
+    import tempfile
+    from pathlib import Path
+    d = Path(tempfile.mkdtemp())
+    take, _, _ = _fake_capture("hybrid")
+    assert take["speech_split"] == 35 * 100 - 240
+    audio.save_take(take, d)
+    assert audio.load_take(d)["speech_split"] == take["speech_split"]
+
+
+def test_ab_pairs_differ_clearly_in_one_direction():
+    from v2ee import taste
+    L = taste.Learner(["bright", "warm", "polish", "clean", "air"])
+    a, b = L.next_pair(np.random.default_rng(0))
+    diff = np.abs(np.asarray(a) - np.asarray(b))
+    assert (diff > 0).sum() == 1 and diff.max() >= 0.7                       # one thing, clearly (>= 5.6 dB EQ)

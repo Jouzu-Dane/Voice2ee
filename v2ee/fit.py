@@ -11,8 +11,10 @@ from pathlib import Path
 
 from . import easyeffects as ee
 from . import offline, quality, score, search, taste
+import numpy as np
+
 from .audio import ReplayError, VirtualMic, mono, replay_available
-from .term import ask, hidden_keys
+from .term import ask, bad, good, hidden_keys
 
 
 # ------------------------------------------------------------------------------------------- what's available
@@ -26,12 +28,13 @@ def print_full_status(st):
     ok_e, lines = st["exact"]
     ok_q, why_q = st["quality"]
     print("\nFull version components:")
-    print(f"  {'✔' if ok_e else '✘'} exact offline plugins (lilv + your LSP/Calf LV2 plugins)")
+    print((good if ok_e else bad)(f"  {'✔' if ok_e else '✘'} exact offline plugins (lilv + your LSP/Calf LV2 plugins)"))
     for l in lines:
         print(f"      {l}")
-    print(f"  {'✔' if ok_q else '✘'} quality model (DNSMOS on onnxruntime): {why_q}")
+    print((good if ok_q else bad)(f"  {'✔' if ok_q else '✘'} quality model (DNSMOS on onnxruntime): {why_q}"))
     d = st["deep"]
-    print(f"  {'✔' if d is True else '?' if d == 'flatpak' else '✘'} DeepFilterNet (Deep noise remover)")
+    print((good if d is True else bad)(f"  {'✔' if d is True else '?' if d == 'flatpak' else '✘'} DeepFilterNet "
+                                       "(Deep noise remover)"))
     import os
     if not (ok_e and ok_q) and not os.environ.get("VOICE2EE_FROM_INSTALLER"):
         print("  Get the missing parts with:  ./install.sh --full   (see README: 'Minimal or Full')")
@@ -167,8 +170,9 @@ def _loudness_polish(P, s, a, batch):
 
 
 def default_jobs():
+    """75 % of your CPU cores (at least 1): fast, and leaves room for you and EasyEffects."""
     n = os.cpu_count() or 1
-    return max(1, min(8, n - 1))                         # leave one core for you (and EasyEffects)
+    return max(1, int(n * 0.75))
 
 
 def run_optimise(P, take, args, st, base=None, out=print):
@@ -246,7 +250,7 @@ def run_optimise(P, take, args, st, base=None, out=print):
     if info.get("stopped"):
         out(f"  stopped early after {n} tries - keeping the best so far")
     best.pop("_eqg", None)
-    out(f"  done in {time.time() - t0:.0f} s. Best: {score.summary(a_best)}")
+    out(good(f"  ✔ done in {time.time() - t0:.0f} s. Best: {score.summary(a_best)}"))
     if a_best.get("rejected"):
         out(f"  !! even the best try breaks a limit ({a_best['rejected']}) - keeping the measured preset")
         return P
@@ -292,16 +296,26 @@ class _EERender:
         self.stack = contextlib.ExitStack()
 
     def __enter__(self):
-        self.vm = self.stack.enter_context(VirtualMic())
+        self.vm = self.stack.enter_context(VirtualMic(reload=self._reload))
         return self
+
+    def _reload(self):
+        p = self.sess.out / f"{self.NAME}.json"
+        if p.exists():
+            ee.load_preset(self.NAME, p)
 
     def __call__(self, Pv):
         with hidden_keys():                    # nothing typed while recording ends up anywhere
             path = ee.write_preset(copy.deepcopy(Pv), self.NAME, self.sess.out, self.base)
             ee.load_preset(self.NAME, path)
             time.sleep(0.4)
-            rec, _ = self.vm.play_record(self.clip, self.ee_src)
-        return mono(rec)
+            rec, _ = self.vm.play_record(self.clip, self.ee_src, meter=False)
+        rec = mono(rec)
+        if 20 * np.log10(np.sqrt(np.mean(np.square(rec, dtype=np.float64))) + 1e-12) < -75:
+            raise ReplayError("EasyEffects returned silence. In EasyEffects, set the input device to "
+                              "'voice2ee-replay-mic' (or turn on 'use default input'), or use the instant A/B "
+                              "rendering (Settings: A/B versions made with = automatic)")
+        return rec
 
     def __exit__(self, *exc):
         self.stack.close()
@@ -311,26 +325,28 @@ class _EERender:
         return False
 
 
-def make_ab_runner(take, ee_src, sess, base=None, st=None, rounds=12):
-    """Returns run(P) -> (taste, picks) or None if A/B can't run here."""
+def make_ab_runner(take, ee_src, sess, base=None, st=None, rounds=12, render_with="auto"):
+    """Returns run(P) -> (taste, picks) or None if A/B can't run here.
+    render_with: 'auto' = instant (your real plugins offline in the Full version, the built-in model otherwise),
+                 'easyeffects' = replay every version through EasyEffects (exact on any version, ~20 s per pick)."""
     if take is None:
         return None
     clip = taste.listening_clip(take)
     st = st or {"exact": (False, [])}
 
     def run(P):
-        if st["exact"][0]:
-            chain = offline.LV2Chain()
-            render = (lambda Pv: chain.process(clip, preset_json(Pv, base)))
-            ctx = contextlib.nullcontext(render)
-            how = "your real plugins, offline - instant"
-        elif ee_src and not replay_available():
+        if render_with == "easyeffects" and ee_src and not replay_available():
             ctx = _EERender(sess, ee_src, clip, base)
             how = "through EasyEffects - each pick takes ~20 s to prepare"
+        elif st["exact"][0]:
+            chain = offline.LV2Chain()
+            ctx = contextlib.nullcontext(lambda Pv: chain.process(clip, preset_json(Pv, base)))
+            how = "your real plugins, offline - instant"
         else:
             chain = offline.ApproxChain()
             ctx = contextlib.nullcontext(lambda Pv: chain.process(clip, preset_json(Pv, base)))
-            how = "approximate built-in model (EasyEffects replay unavailable) - close, not exact"
+            how = ("the built-in model - instant. The differences between A and B are what matters; your pick is "
+                   "applied to the real preset and checked through EasyEffects")
         print(f"(A/B versions are made with: {how})")
         try:
             with ctx as render:

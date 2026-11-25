@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import DEFAULT_KEYS, LEVEL_HI, NEG_INF, TARGET_LUFS
+from .eq import SPECIAL_Q
 
 DEEP_LIB = "libdeep_filter_ladspa.so"
 from .eq import bias_default
@@ -258,7 +259,9 @@ def overrides(P, inp):
     if m["rnnoise"]:
         put(K["rnnoise"], ["enable-vad"], bool(P["rnnoise"]["vad"]))
         put(K["rnnoise"], ["vad-thres"], float(P["rnnoise"]["vad_thres"]))
-    if m["eq"]:
+    if m["eq"] and P["eq"].get("relayout"):
+        pass                                   # the whole EQ is rebuilt in write_preset (new band layout)
+    elif m["eq"]:
         ek, e = K["eq"], P["eq"]
         have = inp.get(ek, {})
         blk = out.setdefault(ek, {"left": {}, "right": {}})
@@ -360,7 +363,7 @@ def import_preset(js):
              "vad_thres": num(inp[rk[0]], ["vad-thres"], 70.0)}
         found.append("RNNoise")
 
-    E = {"hpf": 90, "hpf_key": None, "bands": []}
+    E = {"hpf": 90, "hpf_key": None, "bands": [], "raw": {}}
     ek = inst("equalizer")
     if ek:
         blk = inp[ek[0]]
@@ -371,11 +374,13 @@ def import_preset(js):
             if not isinstance(b, dict):
                 continue
             t, f = b.get("type", "Off"), num(b, ["frequency"], 1000.0)
+            E["raw"][key] = copy.deepcopy(b)
             if t == "Hi-pass" and E["hpf_key"] is None:
                 E["hpf"], E["hpf_key"] = f, key
             elif t in ("Bell", "Lo-shelf", "Hi-shelf"):
-                bands.append({"f": f, "g": num(b, ["gain"], 0.0), "q": num(b, ["q"], 1.0), "t": t, "key": key,
-                              "b": bias_default(f)})
+                q = num(b, ["q"], 1.0)
+                bands.append({"f": f, "g": num(b, ["gain"], 0.0), "q": q, "t": t, "key": key,
+                              "b": bias_default(f), "special": t == "Bell" and q > SPECIAL_Q})
         bands.sort(key=lambda x: x["f"])
         for i, b in enumerate(bands):
             b["lo"] = float(np.sqrt(bands[i - 1]["f"] * b["f"])) if i > 0 else b["f"] / 1.41
@@ -483,6 +488,28 @@ def import_preset(js):
     return P, notes
 
 
+def imported_eq_side(P):
+    """The full band list of a re-spread imported EQ: your high-pass, filters and notches exactly as they were
+    (notch gains as tuned), plus the new evenly spread bells/shelves."""
+    E = P["eq"]
+    tuned = {b["key"]: b for b in E["bands"] if b.get("key")}
+    regular_keys = {k for k, b in E["raw"].items()
+                    if b.get("type") in ("Bell", "Lo-shelf", "Hi-shelf") and not (k in tuned and tuned[k].get("special"))}
+    bands = []
+    for k, b in E["raw"].items():
+        if k in regular_keys or b.get("type", "Off") == "Off":
+            continue
+        b = copy.deepcopy(b)
+        if k == E.get("hpf_key"):
+            b["frequency"] = float(E["hpf"])
+        if k in tuned:
+            b["gain"] = round(float(tuned[k]["g"]), 2)
+        bands.append(b)
+    bands += [eq_band(b["f"], b["g"], b["q"], b["t"]) for b in E["bands"] if not b.get("key")]
+    bands.sort(key=lambda b: float(b.get("frequency", 0)))
+    return {f"band{i}": b for i, b in enumerate(bands)}
+
+
 def write_preset(P, name, out, base=None):
     from .search import apply_overrides
     apply_overrides(P)                         # your locks/ranges always win (overrides.toml / .json)
@@ -492,6 +519,11 @@ def write_preset(P, name, out, base=None):
         preset = copy.deepcopy(base)
         deep_merge(preset["input"], overrides(P, base["input"]))
         inp = preset["input"]
+        if P["modules"].get("eq") and P["eq"].get("relayout") and P["keys"].get("eq") in inp:
+            side = imported_eq_side(P)
+            blk = inp[P["keys"]["eq"]]
+            blk["num-bands"] = len(side)
+            blk["left"], blk["right"] = side, copy.deepcopy(side)
         order = inp.setdefault("plugins_order", [])
         if P.get("stereo_fix") in STEREO_MODES and not any(k.startswith("stereo_tools#") for k in order):
             inp["stereo_tools#0"] = stereo_block(P["stereo_fix"])

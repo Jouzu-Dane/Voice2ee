@@ -81,7 +81,7 @@ def _meter(x):
     print("\r  [" + "#" * n + " " * (40 - n) + f"] {db:6.1f} dBFS ", end="", flush=True)
 
 
-def record_multi(seconds, devices, channels=2):
+def record_multi(seconds, devices, channels=2, meter=True):
     """Record several sources at the same time. Returns one (n, channels) float32 array per device."""
     need, blk = int(seconds * SR) * 4 * channels, int(0.05 * SR) * 4 * channels
     procs, bufs = [], [bytearray() for _ in devices]
@@ -123,7 +123,8 @@ def record_multi(seconds, devices, channels=2):
             time.sleep(0.05)
             n = len(bufs[0]) // 4 * 4
             if n >= blk:
-                _meter(np.frombuffer(bytes(bufs[0][n - blk:n]), dtype="<f4"))
+                if meter:
+                    _meter(np.frombuffer(bytes(bufs[0][n - blk:n]), dtype="<f4"))
     finally:
         for p in procs:
             p.terminate()
@@ -249,6 +250,7 @@ def capture_live(device, args, short=False, raw=None):
             else:
                 sp = record(secs, device)
             speech.append(sp)
+        split = len(speech[0]) - 240 if len(speech) > 1 else None   # where the free talk ends (mid-crossfade)
         speech = _join(speech)
         raw_speech = _join(raw_speech) if (raw_ok and raw_speech) else None
         clicks = None
@@ -261,7 +263,8 @@ def capture_live(device, args, short=False, raw=None):
             print("\n[4] Desk knocks - do NOT talk; tap the desk, put your mug down, bump the mic arm a few times")
             countdown("Start", cd)
             taps = record(4 if short else getattr(args, "tap_secs", 5), device)
-    return {"noise": noise, "speech": speech, "clicks": clicks, "taps": taps, "raw_speech": raw_speech}
+    return {"noise": noise, "speech": speech, "clicks": clicks, "taps": taps, "raw_speech": raw_speech,
+            "speech_split": split}
 
 
 def _join(parts, fade=480):
@@ -289,6 +292,8 @@ def save_take(take, folder):
             wavfile.write(f, SR, np.asarray(take[k], dtype=np.float32))
         elif f.exists():
             f.unlink()
+    import json
+    (folder / "meta.json").write_text(json.dumps({"speech_split": take.get("speech_split")}))
 
 
 def load_take(folder):
@@ -300,6 +305,11 @@ def load_take(folder):
     for k in ("noise", "speech", "clicks", "taps"):
         f = folder / f"{k}.wav"
         take[k] = wavfile.read(f)[1].astype(np.float32) if f.exists() else None
+    import json
+    try:
+        take["speech_split"] = json.loads((folder / "meta.json").read_text()).get("speech_split")
+    except (OSError, ValueError):
+        take["speech_split"] = None
     return take
 
 
@@ -351,7 +361,7 @@ class VirtualMic:
             self.reload()
         return self
 
-    def play_record(self, seg, ee_src, lead=0.4, tail=0.8, lag=None):
+    def play_record(self, seg, ee_src, lead=0.4, tail=0.8, lag=None, meter=True):
         """Play `seg` into the virtual mic while recording `ee_src`. Returns (processed, lag_samples)."""
         from scipy.io import wavfile
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -359,7 +369,8 @@ class VirtualMic:
         wavfile.write(tmp, SR, np.asarray(seg, dtype=np.float32))
         total = len(seg) / SR + lead + tail
         box = {}
-        t = threading.Thread(target=lambda: box.update(rec=record_multi(total, [ee_src])[0]), daemon=True)
+        t = threading.Thread(target=lambda: box.update(rec=record_multi(total, [ee_src], meter=meter)[0]),
+                             daemon=True)
         t.start()
         time.sleep(lead)
         player = (["pw-play", "--target", self.SINK, str(tmp)] if shutil.which("pw-play")

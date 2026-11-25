@@ -391,3 +391,76 @@ def test_installer_asks_for_full_packages_on_arch():
     assert " python-lilv " in sudo + " " and " lilv " not in sudo + " "
     assert "Still missing:" in out and "sudo pacman -S --needed python-lilv" in out
     assert "some parts missing" in out and "all parts working" not in out
+
+
+def _fake_arch(tmp):
+    """A fake pacman (+ sudo) keeping installed packages and 'Required By' in files."""
+    st = tmp / "pm"
+    (st / "installed").mkdir(parents=True)
+    (st / "reqby").mkdir()
+    (tmp / "os-release").write_text('ID=cachyos\nID_LIKE=arch\nPRETTY_NAME="CachyOS"\n')
+    (tmp / "sudo").write_text('#!/bin/sh\necho "SUDO: $*" >> "$FAKE_PM/log"\nexec "$@"\n')
+    (tmp / "pacman").write_text(r'''#!/bin/sh
+S="$FAKE_PM"
+case "$1" in
+  -Q)  [ -f "$S/installed/$2" ] ;;
+  -Qi) [ -f "$S/installed/$2" ] || exit 1
+       echo "Name            : $2"
+       if [ -f "$S/reqby/$2" ]; then echo "Required By     : $(cat "$S/reqby/$2")"; else echo "Required By     : None"; fi
+       echo "Optional For    : None" ;;
+  -S)  shift; [ "$1" = "--needed" ] && shift
+       for p in "$@"; do touch "$S/installed/$p"; done ;;
+  -Rs) shift; for p in "$@"; do rm -f "$S/installed/$p"; echo "removed $p" >> "$S/log"; done ;;
+esac
+''')
+    for f in ("sudo", "pacman"):
+        (tmp / f).chmod(0o755)
+    return st
+
+
+def test_uninstall_offers_only_unneeded_packages():
+    tmp = Path(tempfile.mkdtemp())
+    st = _fake_arch(tmp)
+    (st / "installed" / "lilv").touch()                                  # you had this before
+    env = dict(os.environ, PREFIX=str(tmp / "prefix"), VOICE2EE_OS_RELEASE=str(tmp / "os-release"),
+               PATH=f"{tmp}:{os.environ['PATH']}", FAKE_PM=str(st))
+    r = subprocess.run(["bash", str(HERE.parent / "install.sh"), "--full", "--yes"], capture_output=True,
+                       text=True, env=env, timeout=300)
+    rec = (tmp / "prefix/share/voice2ee/installed-packages.txt").read_text().split()
+    assert "python-lilv" in rec and "calf" in rec and "lilv" not in rec, rec
+    (st / "reqby" / "lsp-plugins-lv2").write_text("easyeffects")      # EasyEffects needs the LSP plugins
+    (st / "installed" / "lilv").touch()
+    r = subprocess.run(["bash", str(HERE.parent / "install.sh"), "--uninstall", "--yes"], capture_output=True,
+                       text=True, env=env, timeout=120)
+    out = r.stdout
+    print("\n" + "\n".join(l for l in out.splitlines() if l.startswith("  ")))
+    assert "kept - needed by: easyeffects" in out and "only voice2ee needed it" in out
+    log = (st / "log").read_text()
+    assert "removed python-lilv" in log and "removed calf" in log
+    assert "removed lsp-plugins-lv2" not in log and "removed lilv" not in log
+    assert "removed easyeffects" not in log                              # shared apps: never with --yes
+    assert not (tmp / "prefix/share/voice2ee").exists()
+    # second uninstall: nothing recorded any more
+    r = subprocess.run(["bash", str(HERE.parent / "install.sh"), "--uninstall", "--yes"], capture_output=True,
+                       text=True, env=env, timeout=120)
+    assert "No record of system packages" in r.stdout
+
+
+def test_ab_default_is_instant_without_easyeffects():
+    import time
+    P, t = _P()
+    sess = types.SimpleNamespace(out=Path(tempfile.mkdtemp()), current="x")
+    run = fit.make_ab_runner(dict(t, speech_split=len(t["speech"]) * 3 // 4), "easyeffects_source", sess,
+                             st={"exact": (False, [])}, rounds=3)
+    answers = iter(["a", "b", "a"])
+    real_play, real_ask = taste.play, fit.ask
+    taste.play, fit.ask = (lambda x: None), (lambda p: next(answers))
+    try:
+        t0 = time.time()
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            tst, picks = run(P)
+    finally:
+        taste.play, fit.ask = real_play, real_ask
+        taste.taste_file().unlink(missing_ok=True)
+    assert "built-in model - instant" in buf.getvalue() and picks == 3
+    assert time.time() - t0 < 15                                          # no replays through EasyEffects
