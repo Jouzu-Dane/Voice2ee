@@ -46,7 +46,8 @@ def test_saved_settings_fill_in_but_command_line_wins():
 
 
 def test_settings_menu_changes_and_saves():
-    answers = iter(["1", "3", "5", "6", "12", "21", "2", ""])            # profile=video, jobs=6, clicks off, colours on
+    idx = {k: str(i) for i, (k, *_) in enumerate(settings.ITEMS, 1)}
+    answers = iter([idx["profile"], "3", idx["jobs"], "6", idx["click_test"], idx["colors"], "2", ""])
     builtins.input = lambda p="": next(answers)
     with contextlib.redirect_stdout(io.StringIO()) as buf:
         settings.menu()

@@ -50,7 +50,7 @@ How should the first preset be fitted?
   1) Quick     - measure and predict (a few seconds), then refine in rounds
   2) Optimise  - try a few hundred variations on your recording and keep the best, then refine in rounds
                  ({'EXACT: runs your real EasyEffects plugins' if ok_e else
-                   'approximate built-in model, confirmed through EasyEffects; the Full version makes it exact'})
+                   'built-in model, confirmed through EasyEffects; python-lilv (./install.sh --minimal) makes it exact'})
 """)
     while True:
         s = ask("Choose [1/2]: ")
@@ -169,6 +169,12 @@ def _loudness_polish(P, s, a, batch):
     return P, s, a
 
 
+def default_trials(exact):
+    """Automatic number of Optimise tries: more with your real plugins (every try is exactly what EasyEffects
+    does), fewer with the built-in model (the confirmation round corrects the rest)."""
+    return 300 if exact else 200
+
+
 def default_jobs():
     """75 % of your CPU cores (at least 1): fast, and leaves room for you and EasyEffects."""
     n = os.cpu_count() or 1
@@ -180,7 +186,7 @@ def run_optimise(P, take, args, st, base=None, out=print):
     chain_name = offline.LV2Chain.name if exact else offline.ApproxChain.name
     use_q = bool(st["quality"][0]) and not getattr(args, "no_quality", False)
     goal = choose_goal(args)
-    trials = int(getattr(args, "trials", None) or (300 if exact else 200))
+    trials = int(getattr(args, "trials", None) or default_trials(exact))
     tst = None if getattr(args, "no_taste", False) else taste.load_taste()[0]
     short = 10 if exact else 8
     jobs = int(getattr(args, "jobs", None) or default_jobs())
@@ -220,6 +226,9 @@ def run_optimise(P, take, args, st, base=None, out=print):
     evaluate = _score
     chain = types_ns(name=chain_name, exact=exact, passthrough=offline.ApproxChain.passthrough)
 
+    if not exact:
+        why = next((l for l in st["exact"][1] if l.strip()), "real plugins not available")
+        out(f"\n(using the built-in model: {why})")
     out(f"\nOptimising with the {chain.name} chain, goal '{goal}'"
         + (", quality model on" if use_q else "") + f": {trials} tries on your recording, "
         f"{jobs} CPU core{'s' if jobs > 1 else ''}...  (Ctrl+C = stop early, keep the best so far)")

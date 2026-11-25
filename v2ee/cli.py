@@ -292,6 +292,8 @@ def main():
     g.add_argument("--finetune", choices=["keys", "ab", "both"], help="feedback keys, A/B picks, or both (asked)")
     g.add_argument("--ab-render", choices=["auto", "easyeffects"], default="auto",
                    help="A/B versions: instant (default) or replayed through EasyEffects")
+    g.add_argument("--offline", choices=["auto", "builtin"], default="auto",
+                   help="Optimise/A-B: your real plugins when they work (auto), or always the built-in model")
     g.add_argument("--no-taste", action="store_true", help="don't start from your saved A/B taste")
     g.add_argument("--no-quality", action="store_true", help="don't use the quality model even if installed")
     g.add_argument("--check-full", action="store_true", help="show which Full-version parts are installed and work")
@@ -463,9 +465,18 @@ _STATUS = {}
 
 
 def _exact_status(args):
-    """Full-version check, once per run (the LV2 self-test takes a few seconds)."""
+    """Which offline chain is available, checked once per run (the plugin self-test takes a few seconds).
+    Always checked when it might be used (Optimise AND A/B picks), unless Settings chose the built-in model."""
     if "st" not in _STATUS:
-        _STATUS["st"] = fit.full_status(run_selftest=getattr(args, "engine", None) != "quick")
+        if getattr(args, "offline", "auto") == "builtin":
+            st = fit.full_status(run_selftest=False)
+            st["exact"] = (False, ["built-in model chosen in Settings"])
+        else:
+            from . import offline
+            if offline.lilv_importable():
+                print("(checking your EasyEffects plugins - a few seconds...)")
+            st = fit.full_status(run_selftest=True)
+        _STATUS["st"] = st
     return _STATUS["st"]
 
 

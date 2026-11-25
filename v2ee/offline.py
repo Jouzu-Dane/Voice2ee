@@ -21,7 +21,7 @@ from .config import NEG_INF, SR
 
 
 class ApproxChain:
-    name, exact = "approximate (built-in model)", False
+    name, exact = "built-in model (approximate)", False
     passthrough = ("rnnoise", "deepfilternet", "stereo_tools", "level_meter")
 
     def process(self, x, preset):
@@ -152,7 +152,7 @@ def convert(conv, value, port):
 class LV2Chain:
     """Hosts the real plugins in-process with lilv (python bindings). Provides the URID map and options
     features LSP plugins need, buffers for their atom (UI message) ports, and compensates reported latency."""
-    name, exact = "exact (your real LV2 plugins)", True
+    name, exact = "your real plugins (exact)", True
     passthrough = ("rnnoise", "deepfilternet", "stereo_tools", "level_meter")
     BLOCK = 512
 

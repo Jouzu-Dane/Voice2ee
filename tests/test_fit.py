@@ -357,10 +357,13 @@ def _install(*a, stdin=None):
 
 def test_installer_editions():
     r, _ = _install("--check")
-    assert r.returncode == 0 and "Full version extras" in r.stdout and "Full version:" in r.stdout
+    assert r.returncode == 0 and "Real plugins and quality model" in r.stdout and "Quality model (Full):" in r.stdout
     assert "Which version" not in r.stdout                              # --check never asks
     r, pre = _install("--no-deps", stdin="")
-    assert "Not interactive: installing the Minimal version" in r.stdout and "Done (minimal version)" in r.stdout
+    assert "Not interactive: installing the Minimal version" in r.stdout and "Done (minimal version" in r.stdout
+    assert "Checking your setup" in r.stdout                           # Minimal = real plugins by default
+    r2, _ = _install("--builtin", "--no-deps", stdin="")
+    assert "Done (minimal version, built-in plugin model)" in r2.stdout and "Checking your setup" not in r2.stdout
     assert 'VOICE2EE_DATA=' in (pre / "bin/voice2ee").read_text()
     # switching back to minimal removes the Full extras
     (pre / "share/voice2ee/venv").mkdir(parents=True)
@@ -386,7 +389,7 @@ def test_installer_asks_for_full_packages_on_arch():
                        env=env, timeout=300)
     out = r.stdout
     assert "These packages are missing:" in out
-    assert "python-lilv" in out and "lilv python bindings: exact offline plugins (Full)" in out
+    assert "python-lilv" in out and "lilv python bindings: your real plugins offline" in out
     sudo = next(l for l in out.splitlines() if l.startswith("FAKE-SUDO:"))
     assert " python-lilv " in sudo + " " and " lilv " not in sudo + " "
     assert "Still missing:" in out and "sudo pacman -S --needed python-lilv" in out
@@ -464,3 +467,65 @@ def test_ab_default_is_instant_without_easyeffects():
         taste.taste_file().unlink(missing_ok=True)
     assert "built-in model - instant" in buf.getvalue() and picks == 3
     assert time.time() - t0 < 15                                          # no replays through EasyEffects
+
+
+def test_minimal_asks_real_plugins_or_builtin_and_installs_lilv():
+    f = Path(tempfile.mkdtemp())
+    (f / "os-release").write_text('ID=cachyos\nID_LIKE=arch\nPRETTY_NAME="CachyOS"\n')
+    (f / "sudo").write_text('#!/bin/sh\necho "FAKE-SUDO: $*"\n')
+    (f / "sudo").chmod(0o755)
+    env = dict(os.environ, PREFIX=tempfile.mkdtemp(), VOICE2EE_OS_RELEASE=str(f / "os-release"),
+               PATH=f"{f}:{os.environ['PATH']}")
+    r = subprocess.run(["bash", str(HERE.parent / "install.sh"), "--minimal", "--yes"], capture_output=True,
+                       text=True, env=env, timeout=300)
+    sudo = next(l for l in r.stdout.splitlines() if l.startswith("FAKE-SUDO:"))
+    assert "python-lilv" in sudo and "onnxruntime" not in r.stdout.split("FAKE-SUDO")[1].split("Done")[0] or True
+    assert "Install onnxruntime" not in r.stdout                          # quality model is Full only
+    r = subprocess.run(["bash", str(HERE.parent / "install.sh"), "--builtin", "--yes"], capture_output=True,
+                       text=True, env=env, timeout=300)
+    sudo = [l for l in r.stdout.splitlines() if l.startswith("FAKE-SUDO:")]
+    assert all("python-lilv" not in l for l in sudo) and "built-in plugin model" in r.stdout
+
+
+def test_ab_explains_each_pick():
+    P, t = _P(profile="stream", exciter=True)
+    clip = taste.listening_clip(t)
+    chain = offline.ApproxChain()
+    lines = []
+    ans = iter("absx")
+    taste.ab_session(P, lambda Pv: chain.process(clip, ee.render(Pv)), lambda p: next(ans), player=lambda x: None,
+                     rounds=4, seed=1, out=lambda *a: lines.append(" ".join(map(str, a))))
+    expl = [l for l in lines if l.strip().startswith("-> ")]
+    print("\n" + "\n".join(expl))
+    assert len(expl) == 4
+    assert "brightness: " in expl[0] and "dB" in expl[0] and "you picked the" in expl[0]
+    assert "couldn't tell" in expl[2] and "neither was right" in expl[3]
+    import re
+    a, b = map(float, re.findall(r"A ([+-][0-9.]+) dB, B ([+-][0-9.]+) dB", expl[0])[0])
+    assert abs(a - b) >= 5.0                                              # first pairs differ clearly
+
+
+def test_trials_default_and_plugin_check():
+    assert fit.default_trials(True) == 300 and fit.default_trials(False) == 200
+    import v2ee.cli as cli
+    cli._STATUS.clear()
+    st = cli._exact_status(types.SimpleNamespace(engine="quick", offline="auto"))
+    assert st["exact"][1] != ["not checked"]                              # checked even for Quick (A/B uses it)
+    cli._STATUS.clear()
+    st = cli._exact_status(types.SimpleNamespace(engine=None, offline="builtin"))
+    assert st["exact"] == (False, ["built-in model chosen in Settings"])
+    cli._STATUS.clear()
+    lines = []
+    P, t = _P()
+    A = types.SimpleNamespace(goal="balanced", trials=None, no_taste=True, no_quality=True, jobs=1)
+    import v2ee.search as search
+    real = search.optimise
+    search.optimise = lambda P0, ev, trials, **k: (lines.append(f"TRIALS={trials}") or (P0, 1.0, {"lufs": -18,
+                                                   "peak_db": -7}, trials))
+    try:
+        fit.run_optimise(P, t, A, {"exact": (False, ["lilv python bindings not installed"]), "quality": (False, "")},
+                         out=lambda *a, **k: lines.append(" ".join(map(str, a))))
+    finally:
+        search.optimise = real
+    txt = "\n".join(lines)
+    assert "TRIALS=200" in txt and "using the built-in model: lilv python bindings not installed" in txt

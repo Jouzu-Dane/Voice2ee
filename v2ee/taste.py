@@ -51,7 +51,8 @@ def apply_taste(P, t):
             g += STEP_DB * t.get("warm", 0) * (120 <= f < 400)
             g += STEP_DB * t.get("bright", 0) * (2000 <= f < 6000)
             g += STEP_DB * t.get("air", 0) * (f >= 7000)
-            bd["g"] = round(clip(g, *glim(f)), 2)
+            lo, hi = glim(f)                  # taste may go a bit past the tuner's own limits, so A/B stays audible
+            bd["g"] = round(clip(g, lo - 4, hi + 4), 2)
     if m.get("exciter") and "air" in t:
         P["exciter"]["amount"] = round(clip(P["exciter"]["amount"] + t["air"], 0, 6), 2)
     if m.get("comp") and "polish" in t:
@@ -211,6 +212,48 @@ def listening_clip(take, free_secs=5.0, read_secs=4.0):
     return np.concatenate(parts)
 
 
+def _eq_shift(P, Pv, lo, hi):
+    d = [bv["g"] - b["g"] for b, bv in zip(P["eq"]["bands"], Pv["eq"]["bands"]) if lo <= b["f"] < hi]
+    return float(np.mean(d)) if d else None
+
+
+def explain_pair(P, Pa, Pb, dim):
+    """What A and B actually were, in plain numbers (shown AFTER you pick, so the test stays blind)."""
+    m = P["modules"]
+    if dim in ("bright", "warm", "air"):
+        lo, hi, name = {"bright": (2000, 6000, "2-6 kHz"), "warm": (120, 400, "120-400 Hz"),
+                        "air": (7000, 30000, "7 kHz and up")}[dim]
+        parts = []
+        if m.get("eq"):
+            a, b = _eq_shift(P, Pa, lo, hi), _eq_shift(P, Pb, lo, hi)
+            if a is not None:
+                parts.append(f"EQ at {name}: A {a:+.1f} dB, B {b:+.1f} dB")
+        if dim == "air" and m.get("exciter"):
+            parts.append(f"exciter: A {Pa['exciter']['amount']:.1f} dB, B {Pb['exciter']['amount']:.1f} dB")
+        return "; ".join(parts)
+    if dim == "polish":
+        s = (f"leveler: A {Pa['comp']['ratio']:.1f}:1 @ {Pa['comp']['thr']:.1f} dB, "
+             f"B {Pb['comp']['ratio']:.1f}:1 @ {Pb['comp']['thr']:.1f} dB")
+        if m.get("comp2"):
+            s += f"; peak compressor: A {Pa['comp2']['ratio']:.1f}:1, B {Pb['comp2']['ratio']:.1f}:1"
+        return s
+    if dim == "clean":
+        parts = []
+        if m.get("noise"):
+            stage = "expander" if m["noise"] in ("expander", "both") else "gate"
+            parts.append(f"{stage} threshold: A {Pa['gate']['thr']:.1f} dB, B {Pb['gate']['thr']:.1f} dB")
+            if m["noise"] in ("expander", "both"):
+                parts.append(f"ratio A {Pa['gate']['ratio']:.1f}:1, B {Pb['gate']['ratio']:.1f}:1")
+        if m.get("deep") and P.get("deep"):
+            parts.append(f"Deep noise remover limit: A {Pa['deep']['atten']:.0f} dB, B {Pb['deep']['atten']:.0f} dB")
+        return "; ".join(parts)
+    return ""
+
+
+SIDES = {"bright": ("brighter", "darker"), "warm": ("warmer", "leaner"), "polish": ("more polished", "more natural"),
+         "clean": ("cleaner", "more open"), "air": ("airier", "less airy")}
+
+
 def ab_session(P, render, ask, player=None, rounds=12, seed=None, out=print):
     """render(P_variant) -> mono clip. ask(prompt) -> answer. Returns (taste, picks, learner)."""
     player = player or play
@@ -225,9 +268,8 @@ def ab_session(P, render, ask, player=None, rounds=12, seed=None, out=print):
     picks = 0
     for rnd in range(1, rounds + 1):
         ta, tb = L.next_pair(rng)
-        va = render(apply_taste(P, dict(zip(dims, ta))))
-        vb = render(apply_taste(P, dict(zip(dims, tb))))
-        va, vb = match_pair(va, vb)
+        Pa, Pb = apply_taste(P, dict(zip(dims, ta))), apply_taste(P, dict(zip(dims, tb)))
+        va, vb = match_pair(render(Pa), render(Pb))
         while True:
             out(f"\nPick {rnd}/{rounds}:  playing A...")
             player(va)
@@ -238,6 +280,14 @@ def ab_session(P, render, ask, player=None, rounds=12, seed=None, out=print):
                 break
         if ans == "q":
             break
+        k = int(np.argmax(np.abs(np.asarray(ta) - np.asarray(tb))))
+        dim = dims[k]
+        hi_side = "A" if ta[k] > tb[k] else "B"
+        more, less = SIDES[dim]
+        verdict = {"a": f"you picked the {more if hi_side == 'A' else less} one",
+                   "b": f"you picked the {more if hi_side == 'B' else less} one",
+                   "s": "you couldn't tell them apart", "x": "neither was right"}[ans]
+        out(f"  -> {DIMS[dim].split(' (')[0]}: {hi_side} was {more}. {explain_pair(P, Pa, Pb, dim)}  ({verdict})")
         L.update(ta, tb, {"a": "a", "b": "b", "s": "same", "x": "bad"}[ans])
         picks += 1
     t = L.taste()
