@@ -2,7 +2,7 @@
 
 **Measure your voice, build an EasyEffects microphone preset from it, then tune it round by round until you're happy.**
 
-voice2ee is a command-line tool for Linux streamers and voice-chat users. It records your mic and room, and writes a
+voice2ee is a command-line tool for Linux users. It records your mic and room, and writes a
 complete [EasyEffects](https://github.com/wwmm/easyeffects) input preset fitted to *your* voice, mic and keyboard
 noise. It then keeps measuring what comes out of EasyEffects and adjusts the preset, with your feedback, until it
 sounds right.
