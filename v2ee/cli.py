@@ -401,10 +401,21 @@ Record your raw (unprocessed) voice once?
         else:
             mode = "live"
         save_state(P, sess, str(src), raw, mode)
-        ab, start_ab = None, False
+        ab, how = None, "keys"
         if take is not None:
             ab = fit.make_ab_runner(take, ee_src, sess, base, st=_exact_status(args), render_with=args.ab_render)
-            start_ab = fit.choose_finetune(args) in ("ab", "both")
+            how = fit.choose_finetune(args)
+        if how == "ab":                                  # A/B only: no rounds; the result becomes the next version
+            from .loop import finish
+            t, picks = ab(P)
+            if picks and any(abs(v) >= 0.05 for v in t.values()):
+                P = taste.apply_taste(P, t)
+                sess.changed = True
+                finish(P, sess, base, str(src), raw, mode)
+            else:
+                print("No change - your preset stays as it was.")
+            return
+        start_ab = how == "both"
         final = tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=base,
                           base_file=str(src), raw=raw, test_mode=mode, ab=ab, start_ab=start_ab)
         if final:
@@ -442,7 +453,8 @@ Record your raw (unprocessed) voice once?
     for n in notes:
         print(" *", n)
     st = _exact_status(args)
-    if fit.choose_engine(args, st) == "optimise":
+    optimised = fit.choose_engine(args, st) == "optimise"
+    if optimised:
         P = fit.run_optimise(P, take, args, st)
     ver = next_version(out, stem)
     name0 = f"{stem}_v{ver}"
@@ -450,18 +462,46 @@ Record your raw (unprocessed) voice once?
     sess = Session(out, stem, ver, name0)
     save_state(P, sess, raw=raw, mode=mode)
     print(good(f"\n✓ Saved: {path}"))
-    print("\nNext, tuning measures the sound AFTER EasyEffects, so the preset gets loaded there.")
-    if ee_src is None:
-        try:
-            ee_src = choose_ee()
-        except Quit:
-            print(f"\n'{name0}' is saved. Continue tuning later with:  ./voice2ee.py --resume")
-            return
-    start_ab = fit.choose_finetune(args) in ("ab", "both")
     ab = fit.make_ab_runner(take, ee_src, sess, args.base, st=st, render_with=args.ab_render)
-    tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=args.base, raw=raw, test_mode=mode,
-              ab=ab, start_ab=start_ab)
-    print("Resume later with:  ./voice2ee.py --resume")
+    while True:
+        nxt = "tune" if getattr(args, "finetune", None) else fit.after_menu(optimised)
+        if nxt == "happy":
+            how = ee.load_preset(name0, path)
+            print(good(f"\n✓ Saved{' and loaded' if how else ''}: {name0}  ({path})"))
+            if not how:
+                print(f"Note: load '{name0}' in EasyEffects' Input tab (its local server wasn't reachable).")
+            return
+        if nxt == "optimise":
+            P = fit.run_optimise(P, take, args, st, before_name="current preset" if optimised else "measured preset")
+            optimised = True
+            path = ee.write_preset(P, name0, out, args.base)
+            save_state(P, sess, raw=raw, mode=mode)
+            print(good(f"✓ Saved: {path}"))
+            continue
+        how = fit.choose_finetune(args)
+        if how == "ab":                                  # A/B only: no rounds through EasyEffects
+            r = ab(P) if ab else None
+            if ab is None:
+                print("Note: A/B picks need a recording of your voice.")
+            elif r and r[1] and any(abs(v) >= 0.05 for v in r[0].values()):
+                P = taste.apply_taste(P, r[0])
+                path = ee.write_preset(P, name0, out, args.base)
+                save_state(P, sess, raw=raw, mode=mode)
+                print(good(f"✓ Moved to your taste ({taste.describe(r[0])}) and saved: {path}"))
+            args.finetune = None                         # back to the menu
+            continue
+        print("\nTuning measures the sound AFTER EasyEffects, so the preset gets loaded there.")
+        if ee_src is None:
+            try:
+                ee_src = choose_ee()
+            except Quit:
+                print(f"\n'{name0}' is saved. Continue tuning later with:  ./voice2ee.py --resume")
+                return
+            ab = fit.make_ab_runner(take, ee_src, sess, args.base, st=st, render_with=args.ab_render)
+        tune_loop(P, sess, make_measure(mode, take, ee_src, raw, args, sess), base=args.base, raw=raw,
+                  test_mode=mode, ab=ab, start_ab=how == "both")
+        print("Resume later with:  ./voice2ee.py --resume")
+        return
 
 
 _STATUS = {}

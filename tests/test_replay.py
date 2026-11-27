@@ -366,3 +366,17 @@ def test_ab_picks_through_easyeffects():
         taste.taste_file().unlink(missing_ok=True)
     finally:
         fake.close()
+
+
+def test_mode2_ab_only_saves_next_version_without_rounds():
+    from v2ee import fit
+    tmp, fake = _env()
+    m, undo = _monkey()
+    try:
+        m(fit, "make_ab_runner", lambda *a, **k: (lambda P: ({"warm": 0.5}, 6)))
+        seen = _run_mode2(["", "", "1", "2"], tmp, m)                    # record once, then A/B only
+        assert "test_mode" not in seen                                    # tune_loop (rounds) never ran
+        assert (tmp / "presets" / "mine_v2.json").exists()                # result saved as the next version
+    finally:
+        undo()
+        fake.close()

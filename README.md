@@ -434,8 +434,28 @@ CPU). If it uses the built-in model, it says why. Press **Ctrl+C** to stop early
 loudness directly. When it's done, a **before/after** comparison plays a short clip
 (free talk, test sentences, a moment of keyboard noise) through the measured preset and then through the optimised
 one, at the same loudness so you hear the sound itself (the real loudness difference is stated). Press Enter to
-continue with the optimised preset, `r` to play again, or `k` to keep the measured one. The result is then loaded
-and confirmed in a normal round through EasyEffects. RNNoise and the Deep noise remover can't run offline, so they're judged in that round.
+continue with the optimised preset, `r` to play again, or `k` to keep the measured one.
+
+### What next
+
+Once the first preset exists (after Quick, or after Optimise and its before/after), nothing runs through
+EasyEffects until you choose:
+
+```
+  1) I'm happy with this - save it, load it into EasyEffects and quit
+  2) Re-run Optimise (continues from this result)     (or "Optimise" after Quick)
+  3) Tune - feedback keys, A/B picks, or both
+```
+
+**Tune** then asks how:
+
+| Choice | What happens |
+|---|---|
+| Feedback keys | tuning rounds through EasyEffects: measure, automatic adjustments, and your feedback keys |
+| A/B picks | about 12 picks, then the preset moves to your taste and you're back at the menu above (no rounds) |
+| Both | A/B picks first, then the tuning rounds |
+
+RNNoise and the Deep noise remover can't run offline, so the first tuning round is where they're judged. 
 
 ### A/B picks (step 3)
 
@@ -469,7 +489,8 @@ gets right; the result is applied to the real preset and checked through EasyEff
 every version to come from EasyEffects itself, set *A/B versions made with* to `easyeffects` in Settings (or
 `--ab-render easyeffects`); each pick then takes about 20 s to prepare.
 
-Choose A/B picks at the start of fine-tuning, or press `a` in any round.
+Choose A/B picks under *Tune*, or press `a` in any tuning round. In Existing mode, A/B picks only (no rounds)
+saves the result as the next version.
 
 ## Feedback keys
 
