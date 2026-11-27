@@ -77,14 +77,29 @@ def choose_goal(args):
             return keys[int(s) - 1]
 
 
+def after_menu(optimised):
+    """What next, once a preset exists. Nothing runs through EasyEffects until you choose to tune."""
+    print(f"""
+What next?
+  1) I'm happy with this - save it, load it into EasyEffects and quit
+  2) {'Re-run Optimise (continues from this result)' if optimised else 'Optimise (try a few hundred variations)'}
+  3) Tune - feedback keys, A/B picks, or both
+""")
+    while True:
+        s = ask("Choose [1/2/3]: ")
+        if s in ("1", "2", "3"):
+            return {"1": "happy", "2": "optimise", "3": "tune"}[s]
+
+
 def choose_finetune(args):
     if getattr(args, "finetune", None):
         return args.finetune
     print("""
-How do you want to fine-tune?
-  1) Feedback keys - describe what you hear (boxy, harsh, clicks, ...) each round
+How do you want to tune?
+  1) Feedback keys - rounds through EasyEffects: it measures, adjusts, and you describe what you hear
   2) A/B picks     - pick the better of two versions, about 12 picks; learns your taste and saves it
-  3) Both          - A/B picks first, then rounds with feedback keys (you can press 'a' for more picks anytime)
+                     (no rounds through EasyEffects - you come back to this menu afterwards)
+  3) Both          - A/B picks first, then rounds with feedback keys (press 'a' for more picks anytime)
 """)
     while True:
         s = ask("Choose [1/2/3, Enter = 1]: ")
@@ -183,7 +198,7 @@ def default_jobs():
     return max(1, int(n * 0.75))
 
 
-def run_optimise(P, take, args, st, base=None, out=print):
+def run_optimise(P, take, args, st, base=None, out=print, before_name="measured preset"):
     exact = bool(st["exact"][0])
     chain_name = offline.LV2Chain.name if exact else offline.ApproxChain.name
     use_q = bool(st["quality"][0]) and not getattr(args, "no_quality", False)
@@ -270,11 +285,12 @@ def run_optimise(P, take, args, st, base=None, out=print):
     if not chain.exact:
         out("  Note: built-in model - the first round through EasyEffects confirms it and corrects what differs")
     if hasattr(args, "no_before_after") and not args.no_before_after:
-        return before_after(P, best, take, exact, base, out=out)
+        return before_after(P, best, take, exact, base, out=out, before_name=before_name)
     return best
 
 
-def before_after(P0, best, take, exact, base=None, out=print, ask_fn=None, player=None):
+def before_after(P0, best, take, exact, base=None, out=print, ask_fn=None, player=None,
+                 before_name="measured preset"):
     """Play a short clip through the measured preset, then through the optimised one, at the same loudness, so
     you hear what Optimise changed. Returns the preset to continue with (you can keep the measured one)."""
     from . import loudness
@@ -290,25 +306,25 @@ def before_after(P0, best, take, exact, base=None, out=print, ask_fn=None, playe
         return best
     diff = loudness.integrated(b) - loudness.integrated(a)
     a, b = taste.match_pair(a, b)
-    out("\nBefore / after: the same clip through the measured preset, then the optimised one. Both play at the same "
+    out(f"\nBefore / after: the same clip through the {before_name}, then the optimised one. Both play at the same "
         "loudness so you hear the sound itself" + (f" (in the preset the optimised one is {diff:+.1f} LU "
                                                     f"{'louder' if diff > 0 else 'quieter'})" if abs(diff) >= 0.5 else "")
         + ".")
     while True:
         try:
-            out("  playing BEFORE (measured preset)...")
+            out(f"  playing BEFORE ({before_name})...")
             player(a)
             out("  playing AFTER  (optimised)...")
             player(b)
         except Exception as ex:
             out(f"Note: couldn't play the clips ({ex}) - continuing with the optimised preset")
             return best
-        s = ask_fn("  Enter = continue with the optimised preset   r = play again   k = keep the measured one: ")
+        s = ask_fn(f"  Enter = continue with the optimised preset   r = play again   k = keep the {before_name}: ")
         s = s.strip().lower()
         if s == "r":
             continue
         if s == "k":
-            out("  keeping the measured preset")
+            out(f"  keeping the {before_name}")
             return P0
         return best
 
